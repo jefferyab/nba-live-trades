@@ -98,7 +98,7 @@ def discover_tickers():
                 match = re.match(r'(.+?):\s*(\d+)\+\s*(points|rebounds|assists|threes)', market.title.lower())
                 if match:
                     player = match.group(1).strip().title()
-                    line = f"Over {match.group(2)}.5"
+                    line = f"{match.group(2)}+ {match.group(3)}"
 
                 # Game slug from ticker parts
                 parts = ticker.split('-')
