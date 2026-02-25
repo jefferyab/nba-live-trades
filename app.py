@@ -266,14 +266,12 @@ class TradeWebSocket:
 # ============================================================
 
 class TradeStore:
-    MAX_TRADES = 500
+    MAX_TRADES = 10000
+    STATS_WINDOW = 6 * 3600  # 6 hours in seconds
 
     def __init__(self):
         self.trades = deque(maxlen=self.MAX_TRADES)
         self.lock = threading.Lock()
-        self.volume_by_player = defaultdict(lambda: {"count": 0, "contracts": 0, "dollar_volume": 0.0})
-        self.volume_by_prop_type = defaultdict(lambda: {"count": 0, "contracts": 0, "dollar_volume": 0.0})
-        self.volume_by_ticker = defaultdict(lambda: {"count": 0, "contracts": 0, "dollar_volume": 0.0})
         self.total_trades = 0
         self.total_contracts = 0
         self.total_dollar_volume = 0.0
@@ -314,39 +312,54 @@ class TradeStore:
 
         with self.lock:
             self.trades.appendleft(enriched)
-            self._update_aggregates(enriched)
+            self.total_trades += 1
+            self.total_contracts += count
+            self.total_dollar_volume += dollar_amount
 
         return enriched
 
-    def _update_aggregates(self, trade):
-        player = trade['player']
-        prop_type = trade['prop_type']
-        ticker = trade['ticker']
-        contracts = trade['count']
-        dollars = trade['dollar_amount']
-
-        for bucket, key in [
-            (self.volume_by_player, player),
-            (self.volume_by_prop_type, prop_type),
-            (self.volume_by_ticker, ticker),
-        ]:
-            bucket[key]['count'] += 1
-            bucket[key]['contracts'] += contracts
-            bucket[key]['dollar_volume'] += dollars
-
-        self.total_trades += 1
-        self.total_contracts += contracts
-        self.total_dollar_volume += dollars
-
     def get_stats(self):
         with self.lock:
+            cutoff = time.time() - self.STATS_WINDOW
+            volume_by_player = defaultdict(lambda: {"count": 0, "contracts": 0, "dollar_volume": 0.0})
+            volume_by_prop_type = defaultdict(lambda: {"count": 0, "contracts": 0, "dollar_volume": 0.0})
+            volume_by_ticker = defaultdict(lambda: {"count": 0, "contracts": 0, "dollar_volume": 0.0})
+            window_trades = 0
+            window_contracts = 0
+            window_volume = 0.0
+
+            for trade in self.trades:
+                if trade['ts'] < cutoff:
+                    break  # trades are newest-first, so we can stop
+                player = trade['player']
+                prop_type = trade['prop_type']
+                ticker = trade['ticker']
+                contracts = trade['count']
+                dollars = trade['dollar_amount']
+
+                volume_by_player[player]['count'] += 1
+                volume_by_player[player]['contracts'] += contracts
+                volume_by_player[player]['dollar_volume'] += dollars
+
+                volume_by_prop_type[prop_type]['count'] += 1
+                volume_by_prop_type[prop_type]['contracts'] += contracts
+                volume_by_prop_type[prop_type]['dollar_volume'] += dollars
+
+                volume_by_ticker[ticker]['count'] += 1
+                volume_by_ticker[ticker]['contracts'] += contracts
+                volume_by_ticker[ticker]['dollar_volume'] += dollars
+
+                window_trades += 1
+                window_contracts += contracts
+                window_volume += dollars
+
             top_players = sorted(
-                self.volume_by_player.items(),
+                volume_by_player.items(),
                 key=lambda x: x[1]['dollar_volume'], reverse=True
             )[:10]
 
             top_markets = sorted(
-                self.volume_by_ticker.items(),
+                volume_by_ticker.items(),
                 key=lambda x: x[1]['dollar_volume'], reverse=True
             )[:10]
 
@@ -362,15 +375,15 @@ class TradeStore:
                 })
 
             return {
-                'total_trades': self.total_trades,
-                'total_contracts': self.total_contracts,
-                'total_dollar_volume': round(self.total_dollar_volume, 2),
-                'top_players': [{'player': p, **v} for p, v in top_players],
-                'volume_by_prop_type': {k: dict(v) for k, v in self.volume_by_prop_type.items()},
+                'total_trades': window_trades,
+                'total_contracts': window_contracts,
+                'total_dollar_volume': round(window_volume, 2),
+                'top_players': [{'player': p, **dict(v)} for p, v in top_players],
+                'volume_by_prop_type': {k: dict(v) for k, v in volume_by_prop_type.items()},
                 'top_markets': top_markets_enriched,
             }
 
-    def get_recent_trades(self, limit=50):
+    def get_recent_trades(self, limit=100):
         with self.lock:
             return list(self.trades)[:limit]
 
