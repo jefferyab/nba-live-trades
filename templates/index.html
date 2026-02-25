@@ -439,9 +439,9 @@
 
         <div class="filter-group">
             <span class="filter-label">Game</span>
-            <select id="filterGame" class="filter-select">
-                <option value="all">All Games</option>
-            </select>
+            <div class="toggle-group" id="filterGame" style="flex-wrap: wrap; gap: 2px;">
+                <button class="toggle-btn active" data-value="all">All</button>
+            </div>
         </div>
     </div>
 
@@ -509,7 +509,7 @@
                 minDollar: 0,
                 side: 'all',
                 propType: 'all',
-                game: 'all',
+                games: new Set(), // empty = all games
             },
             connected: false,
         };
@@ -521,7 +521,7 @@
             if (trade.dollar_amount < state.filters.minDollar) return false;
             if (state.filters.side !== 'all' && trade.taker_side !== state.filters.side) return false;
             if (state.filters.propType !== 'all' && trade.prop_type !== state.filters.propType) return false;
-            if (state.filters.game !== 'all' && trade.game_slug !== state.filters.game) return false;
+            if (state.filters.games.size > 0 && !state.filters.games.has(trade.game_slug)) return false;
             return true;
         }
 
@@ -546,10 +546,39 @@
             refilterFeed();
         });
 
-        document.getElementById('filterGame').addEventListener('change', (e) => {
-            state.filters.game = e.target.value;
-            refilterFeed();
-        });
+        function setupGameFilters() {
+            const group = document.getElementById('filterGame');
+            group.addEventListener('click', (e) => {
+                const btn = e.target.closest('.toggle-btn');
+                if (!btn) return;
+                const value = btn.dataset.value;
+
+                if (value === 'all') {
+                    // Clear all selections
+                    state.filters.games.clear();
+                    group.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                } else {
+                    // Toggle this game
+                    const allBtn = group.querySelector('[data-value="all"]');
+                    if (state.filters.games.has(value)) {
+                        state.filters.games.delete(value);
+                        btn.classList.remove('active');
+                    } else {
+                        state.filters.games.add(value);
+                        btn.classList.add('active');
+                    }
+                    // If nothing selected, re-activate "All"
+                    if (state.filters.games.size === 0) {
+                        allBtn.classList.add('active');
+                    } else {
+                        allBtn.classList.remove('active');
+                    }
+                }
+                refilterFeed();
+            });
+        }
+        setupGameFilters();
 
         function refilterFeed() {
             const feedPanel = document.getElementById('feedPanel');
@@ -718,14 +747,16 @@
         }
 
         function populateGameFilter(games) {
-            const select = document.getElementById('filterGame');
-            select.innerHTML = '<option value="all">All Games</option>';
+            const group = document.getElementById('filterGame');
+            group.innerHTML = '<button class="toggle-btn active" data-value="all">All</button>';
             games.forEach(g => {
-                const opt = document.createElement('option');
-                opt.value = g;
-                opt.textContent = g;
-                select.appendChild(opt);
+                const btn = document.createElement('button');
+                btn.className = 'toggle-btn';
+                btn.dataset.value = g;
+                btn.textContent = g;
+                group.appendChild(btn);
             });
+            state.filters.games.clear();
         }
 
         function updateConnectionStatus() {
