@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+kalshi-python
+cryptography
+websocket-client

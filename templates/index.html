@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NBA Live Trades</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f1115;
+            color: #e4e4e7;
+            min-height: 100vh;
+        }
+
+        /* Header */
+        .header {
+            background: #18181b;
+            border-bottom: 1px solid #27272a;
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .header h1 {
+            font-size: 20px;
+            font-weight: 700;
+            color: #fff;
+        }
+        .connection-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .connection-badge.connected {
+            background: rgba(34, 197, 94, 0.15);
+            color: #22c55e;
+        }
+        .connection-badge.disconnected {
+            background: rgba(239, 68, 68, 0.15);
+            color: #ef4444;
+        }
+        .connection-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: currentColor;
+        }
+        .connection-badge.connected .connection-dot {
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+        .header-stats {
+            display: flex;
+            gap: 20px;
+            font-size: 13px;
+            color: #a1a1aa;
+        }
+        .header-stat-value {
+            color: #fff;
+            font-weight: 600;
+        }
+
+        /* Filters */
+        .filters {
+            background: #18181b;
+            border-bottom: 1px solid #27272a;
+            padding: 12px 24px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+        .filter-group {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .filter-label {
+            font-size: 12px;
+            color: #71717a;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+        }
+        .filter-input {
+            background: #27272a;
+            border: 1px solid #3f3f46;
+            color: #e4e4e7;
+            border-radius: 6px;
+            padding: 6px 10px;
+            font-size: 13px;
+            width: 80px;
+        }
+        .filter-input:focus { outline: none; border-color: #6366f1; }
+
+        .toggle-group {
+            display: flex;
+            border-radius: 6px;
+            overflow: hidden;
+            border: 1px solid #3f3f46;
+        }
+        .toggle-btn {
+            background: #27272a;
+            border: none;
+            color: #a1a1aa;
+            padding: 6px 12px;
+            font-size: 12px;
+            cursor: pointer;
+            font-weight: 500;
+            border-right: 1px solid #3f3f46;
+            transition: all 0.15s;
+        }
+        .toggle-btn:last-child { border-right: none; }
+        .toggle-btn:hover { background: #3f3f46; }
+        .toggle-btn.active {
+            background: #6366f1;
+            color: #fff;
+        }
+
+        .filter-select {
+            background: #27272a;
+            border: 1px solid #3f3f46;
+            color: #e4e4e7;
+            border-radius: 6px;
+            padding: 6px 10px;
+            font-size: 13px;
+        }
+        .filter-select:focus { outline: none; border-color: #6366f1; }
+
+        /* Main Layout */
+        .main {
+            display: flex;
+            height: calc(100vh - 110px);
+        }
+
+        /* Feed Panel */
+        .feed-panel {
+            flex: 6;
+            overflow-y: auto;
+            padding: 16px 24px;
+            border-right: 1px solid #27272a;
+        }
+        .feed-panel::-webkit-scrollbar { width: 6px; }
+        .feed-panel::-webkit-scrollbar-track { background: transparent; }
+        .feed-panel::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 3px; }
+
+        .feed-empty {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 300px;
+            color: #52525b;
+            font-size: 14px;
+            gap: 8px;
+        }
+        .feed-empty-icon { font-size: 32px; }
+
+        /* Trade Card */
+        .trade-card {
+            background: #18181b;
+            border: 1px solid #27272a;
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-bottom: 8px;
+            border-left: 3px solid;
+            animation: slideIn 0.3s ease-out;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        .trade-card.yes { border-left-color: #22c55e; }
+        .trade-card.no { border-left-color: #ef4444; }
+
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .trade-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex: 1;
+            min-width: 0;
+        }
+        .trade-side-badge {
+            font-size: 11px;
+            font-weight: 700;
+            padding: 3px 8px;
+            border-radius: 4px;
+            text-transform: uppercase;
+            flex-shrink: 0;
+        }
+        .trade-side-badge.yes {
+            background: rgba(34, 197, 94, 0.15);
+            color: #22c55e;
+        }
+        .trade-side-badge.no {
+            background: rgba(239, 68, 68, 0.15);
+            color: #ef4444;
+        }
+        .trade-info {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            min-width: 0;
+        }
+        .trade-player {
+            font-weight: 600;
+            font-size: 14px;
+            color: #fff;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .trade-detail {
+            font-size: 12px;
+            color: #a1a1aa;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .prop-badge {
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .prop-badge.points { background: rgba(99, 102, 241, 0.2); color: #818cf8; }
+        .prop-badge.rebounds { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+        .prop-badge.assists { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
+        .prop-badge.threes { background: rgba(168, 85, 247, 0.2); color: #c084fc; }
+
+        .trade-right {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            flex-shrink: 0;
+        }
+        .trade-price {
+            font-size: 14px;
+            font-weight: 600;
+            color: #fff;
+            text-align: right;
+        }
+        .trade-contracts {
+            font-size: 12px;
+            color: #a1a1aa;
+            text-align: right;
+            white-space: nowrap;
+        }
+        .trade-dollar {
+            font-size: 14px;
+            font-weight: 700;
+            color: #fbbf24;
+            min-width: 70px;
+            text-align: right;
+        }
+        .trade-time {
+            font-size: 11px;
+            color: #52525b;
+            min-width: 60px;
+            text-align: right;
+        }
+
+        /* Stats Panel */
+        .stats-panel {
+            flex: 4;
+            overflow-y: auto;
+            padding: 16px 24px;
+        }
+        .stats-panel::-webkit-scrollbar { width: 6px; }
+        .stats-panel::-webkit-scrollbar-track { background: transparent; }
+        .stats-panel::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 3px; }
+
+        .stats-section {
+            margin-bottom: 24px;
+        }
+        .stats-section-title {
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #71717a;
+            font-weight: 600;
+            margin-bottom: 12px;
+        }
+
+        .summary-cards {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 8px;
+            margin-bottom: 24px;
+        }
+        .summary-card {
+            background: #18181b;
+            border: 1px solid #27272a;
+            border-radius: 8px;
+            padding: 12px;
+            text-align: center;
+        }
+        .summary-value {
+            font-size: 20px;
+            font-weight: 700;
+            color: #fff;
+        }
+        .summary-label {
+            font-size: 11px;
+            color: #71717a;
+            margin-top: 4px;
+            text-transform: uppercase;
+        }
+
+        /* Player/Market list */
+        .stat-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #1e1e22;
+        }
+        .stat-row:last-child { border-bottom: none; }
+        .stat-rank {
+            font-size: 12px;
+            color: #52525b;
+            width: 20px;
+            font-weight: 600;
+        }
+        .stat-name {
+            flex: 1;
+            font-size: 13px;
+            color: #e4e4e7;
+            margin-left: 8px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .stat-volume {
+            font-size: 13px;
+            font-weight: 600;
+            color: #fbbf24;
+        }
+
+        /* Prop type bars */
+        .prop-bar-container {
+            margin-bottom: 8px;
+        }
+        .prop-bar-header {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            margin-bottom: 4px;
+        }
+        .prop-bar-name { color: #a1a1aa; }
+        .prop-bar-value { color: #fff; font-weight: 600; }
+        .prop-bar-track {
+            height: 6px;
+            background: #27272a;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        .prop-bar-fill {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.5s ease;
+        }
+        .prop-bar-fill.points { background: #6366f1; }
+        .prop-bar-fill.rebounds { background: #f59e0b; }
+        .prop-bar-fill.assists { background: #22c55e; }
+        .prop-bar-fill.threes { background: #a855f7; }
+
+        @media (max-width: 900px) {
+            .main { flex-direction: column; height: auto; }
+            .feed-panel { border-right: none; border-bottom: 1px solid #27272a; max-height: 60vh; }
+            .stats-panel { max-height: 40vh; }
+            .summary-cards { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <div class="header">
+        <div class="header-left">
+            <h1>NBA Live Trades</h1>
+            <span id="connectionBadge" class="connection-badge disconnected">
+                <span class="connection-dot"></span>
+                <span id="connectionText">Connecting...</span>
+            </span>
+        </div>
+        <div class="header-stats">
+            <span>Trades: <span id="headerTrades" class="header-stat-value">0</span></span>
+            <span>Volume: <span id="headerVolume" class="header-stat-value">$0</span></span>
+            <span>Tickers: <span id="headerTickers" class="header-stat-value">--</span></span>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="filters">
+        <div class="filter-group">
+            <span class="filter-label">Min $</span>
+            <input type="number" id="filterMinDollar" class="filter-input" value="0" min="0" step="10">
+        </div>
+
+        <div class="filter-group">
+            <span class="filter-label">Side</span>
+            <div class="toggle-group" id="filterSide">
+                <button class="toggle-btn active" data-value="all">All</button>
+                <button class="toggle-btn" data-value="yes">Yes</button>
+                <button class="toggle-btn" data-value="no">No</button>
+            </div>
+        </div>
+
+        <div class="filter-group">
+            <span class="filter-label">Prop</span>
+            <div class="toggle-group" id="filterProp">
+                <button class="toggle-btn active" data-value="all">All</button>
+                <button class="toggle-btn" data-value="Points">PTS</button>
+                <button class="toggle-btn" data-value="Rebounds">REB</button>
+                <button class="toggle-btn" data-value="Assists">AST</button>
+                <button class="toggle-btn" data-value="Threes">3PT</button>
+            </div>
+        </div>
+
+        <div class="filter-group">
+            <span class="filter-label">Game</span>
+            <select id="filterGame" class="filter-select">
+                <option value="all">All Games</option>
+            </select>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="main">
+        <div class="feed-panel" id="feedPanel">
+            <div class="feed-empty" id="feedEmpty">
+                <div class="feed-empty-icon">&#9889;</div>
+                <div>Waiting for trades...</div>
+                <div style="font-size: 12px;">NBA prop trades will appear here in real-time</div>
+            </div>
+        </div>
+
+        <div class="stats-panel">
+            <!-- Summary -->
+            <div class="summary-cards">
+                <div class="summary-card">
+                    <div class="summary-value" id="statTotalTrades">0</div>
+                    <div class="summary-label">Trades</div>
+                </div>
+                <div class="summary-card">
+                    <div class="summary-value" id="statTotalContracts">0</div>
+                    <div class="summary-label">Contracts</div>
+                </div>
+                <div class="summary-card">
+                    <div class="summary-value" id="statTotalVolume">$0</div>
+                    <div class="summary-label">Volume</div>
+                </div>
+            </div>
+
+            <!-- Top Players -->
+            <div class="stats-section">
+                <div class="stats-section-title">Top Players by Volume</div>
+                <div id="topPlayers">
+                    <div style="color: #52525b; font-size: 13px;">No data yet</div>
+                </div>
+            </div>
+
+            <!-- Volume by Prop Type -->
+            <div class="stats-section">
+                <div class="stats-section-title">Volume by Prop Type</div>
+                <div id="propTypeBars">
+                    <div style="color: #52525b; font-size: 13px;">No data yet</div>
+                </div>
+            </div>
+
+            <!-- Hot Markets -->
+            <div class="stats-section">
+                <div class="stats-section-title">Hot Markets</div>
+                <div id="hotMarkets">
+                    <div style="color: #52525b; font-size: 13px;">No data yet</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ============================================================
+        // STATE
+        // ============================================================
+        const state = {
+            trades: [],
+            stats: {},
+            filters: {
+                minDollar: 0,
+                side: 'all',
+                propType: 'all',
+                game: 'all',
+            },
+            connected: false,
+        };
+
+        // ============================================================
+        // FILTERS
+        // ============================================================
+        function passesFilter(trade) {
+            if (trade.dollar_amount < state.filters.minDollar) return false;
+            if (state.filters.side !== 'all' && trade.taker_side !== state.filters.side) return false;
+            if (state.filters.propType !== 'all' && trade.prop_type !== state.filters.propType) return false;
+            if (state.filters.game !== 'all' && trade.game_slug !== state.filters.game) return false;
+            return true;
+        }
+
+        // Toggle button setup
+        document.querySelectorAll('.toggle-group').forEach(group => {
+            group.querySelectorAll('.toggle-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    group.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+
+                    const filterId = group.id;
+                    const value = btn.dataset.value;
+                    if (filterId === 'filterSide') state.filters.side = value;
+                    if (filterId === 'filterProp') state.filters.propType = value;
+                    refilterFeed();
+                });
+            });
+        });
+
+        document.getElementById('filterMinDollar').addEventListener('input', (e) => {
+            state.filters.minDollar = parseFloat(e.target.value) || 0;
+            refilterFeed();
+        });
+
+        document.getElementById('filterGame').addEventListener('change', (e) => {
+            state.filters.game = e.target.value;
+            refilterFeed();
+        });
+
+        function refilterFeed() {
+            const feedPanel = document.getElementById('feedPanel');
+            const cards = feedPanel.querySelectorAll('.trade-card');
+            let visible = 0;
+            cards.forEach(card => {
+                const idx = parseInt(card.dataset.index);
+                const trade = state.trades[idx];
+                if (trade && passesFilter(trade)) {
+                    card.style.display = 'flex';
+                    visible++;
+                } else {
+                    card.style.display = 'none';
+                }
+            });
+            const empty = document.getElementById('feedEmpty');
+            if (empty) empty.style.display = visible === 0 && state.trades.length > 0 ? 'none' : (state.trades.length === 0 ? 'flex' : 'none');
+        }
+
+        // ============================================================
+        // RENDERING
+        // ============================================================
+        function formatDollar(amount) {
+            if (amount >= 1000) return '$' + (amount / 1000).toFixed(1) + 'k';
+            return '$' + amount.toFixed(2);
+        }
+
+        function formatNumber(n) {
+            if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+            if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+            return n.toString();
+        }
+
+        function createTradeCard(trade, index, animate) {
+            const side = trade.taker_side;
+            const propClass = trade.prop_type.toLowerCase();
+            const priceDisplay = side === 'yes'
+                ? `${trade.yes_price}\u00A2 YES`
+                : `${trade.no_price}\u00A2 NO`;
+
+            const card = document.createElement('div');
+            card.className = `trade-card ${side}`;
+            card.dataset.index = index;
+            if (!animate) card.style.animation = 'none';
+            if (!passesFilter(trade)) card.style.display = 'none';
+
+            card.innerHTML = `
+                <div class="trade-left">
+                    <span class="trade-side-badge ${side}">${side}</span>
+                    <div class="trade-info">
+                        <div class="trade-player">${trade.player}</div>
+                        <div class="trade-detail">
+                            <span class="prop-badge ${propClass}">${trade.prop_type}</span>
+                            <span>${trade.line}</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="trade-right">
+                    <div>
+                        <div class="trade-price">${priceDisplay}</div>
+                        <div class="trade-contracts">${trade.count} contracts</div>
+                    </div>
+                    <div class="trade-dollar">${formatDollar(trade.dollar_amount)}</div>
+                    <div class="trade-time">${trade.time_str}</div>
+                </div>
+            `;
+            return card;
+        }
+
+        function renderAllTrades() {
+            const feedPanel = document.getElementById('feedPanel');
+            const empty = document.getElementById('feedEmpty');
+
+            if (state.trades.length === 0) {
+                if (!empty) {
+                    feedPanel.innerHTML = `
+                        <div class="feed-empty" id="feedEmpty">
+                            <div class="feed-empty-icon">&#9889;</div>
+                            <div>Waiting for trades...</div>
+                            <div style="font-size: 12px;">NBA prop trades will appear here in real-time</div>
+                        </div>`;
+                }
+                return;
+            }
+
+            feedPanel.innerHTML = '';
+            state.trades.forEach((trade, i) => {
+                feedPanel.appendChild(createTradeCard(trade, i, false));
+            });
+        }
+
+        function prependTrade(trade) {
+            const feedPanel = document.getElementById('feedPanel');
+            const empty = document.getElementById('feedEmpty');
+            if (empty) empty.remove();
+
+            // Reindex existing cards
+            feedPanel.querySelectorAll('.trade-card').forEach(card => {
+                card.dataset.index = parseInt(card.dataset.index) + 1;
+            });
+
+            const card = createTradeCard(trade, 0, true);
+            feedPanel.insertBefore(card, feedPanel.firstChild);
+
+            // Cap DOM nodes at 500
+            while (feedPanel.children.length > 500) {
+                feedPanel.removeChild(feedPanel.lastChild);
+            }
+        }
+
+        function renderStats() {
+            const s = state.stats;
+            if (!s || !s.total_trades) return;
+
+            document.getElementById('statTotalTrades').textContent = formatNumber(s.total_trades);
+            document.getElementById('statTotalContracts').textContent = formatNumber(s.total_contracts);
+            document.getElementById('statTotalVolume').textContent = formatDollar(s.total_dollar_volume);
+            document.getElementById('headerTrades').textContent = formatNumber(s.total_trades);
+            document.getElementById('headerVolume').textContent = formatDollar(s.total_dollar_volume);
+
+            // Top Players
+            const playersEl = document.getElementById('topPlayers');
+            if (s.top_players && s.top_players.length > 0) {
+                playersEl.innerHTML = s.top_players.map((p, i) => `
+                    <div class="stat-row">
+                        <span class="stat-rank">${i + 1}</span>
+                        <span class="stat-name">${p.player}</span>
+                        <span class="stat-volume">${formatDollar(p.dollar_volume)}</span>
+                    </div>
+                `).join('');
+            }
+
+            // Volume by Prop Type
+            const propBars = document.getElementById('propTypeBars');
+            if (s.volume_by_prop_type) {
+                const types = ['Points', 'Rebounds', 'Assists', 'Threes'];
+                const maxVol = Math.max(...types.map(t => (s.volume_by_prop_type[t] || {}).dollar_volume || 0), 1);
+                propBars.innerHTML = types.map(t => {
+                    const vol = (s.volume_by_prop_type[t] || {}).dollar_volume || 0;
+                    const pct = (vol / maxVol * 100).toFixed(1);
+                    return `
+                        <div class="prop-bar-container">
+                            <div class="prop-bar-header">
+                                <span class="prop-bar-name">${t}</span>
+                                <span class="prop-bar-value">${formatDollar(vol)}</span>
+                            </div>
+                            <div class="prop-bar-track">
+                                <div class="prop-bar-fill ${t.toLowerCase()}" style="width: ${pct}%"></div>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            }
+
+            // Hot Markets
+            const marketsEl = document.getElementById('hotMarkets');
+            if (s.top_markets && s.top_markets.length > 0) {
+                marketsEl.innerHTML = s.top_markets.map((m, i) => `
+                    <div class="stat-row">
+                        <span class="stat-rank">${i + 1}</span>
+                        <span class="stat-name">${m.title || m.ticker}</span>
+                        <span class="stat-volume">${formatDollar(m.dollar_volume)}</span>
+                    </div>
+                `).join('');
+            }
+        }
+
+        function populateGameFilter(games) {
+            const select = document.getElementById('filterGame');
+            select.innerHTML = '<option value="all">All Games</option>';
+            games.forEach(g => {
+                const opt = document.createElement('option');
+                opt.value = g;
+                opt.textContent = g;
+                select.appendChild(opt);
+            });
+        }
+
+        function updateConnectionStatus() {
+            const badge = document.getElementById('connectionBadge');
+            const text = document.getElementById('connectionText');
+            if (state.connected) {
+                badge.className = 'connection-badge connected';
+                text.textContent = 'Live';
+            } else {
+                badge.className = 'connection-badge disconnected';
+                text.textContent = 'Disconnected';
+            }
+        }
+
+        // ============================================================
+        // WEBSOCKET
+        // ============================================================
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
+            const ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                state.connected = true;
+                updateConnectionStatus();
+            };
+
+            ws.onclose = () => {
+                state.connected = false;
+                updateConnectionStatus();
+                setTimeout(connectWebSocket, 3000);
+            };
+
+            ws.onerror = () => {
+                state.connected = false;
+                updateConnectionStatus();
+            };
+
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                switch (msg.type) {
+                    case 'bootstrap':
+                        state.trades = msg.trades || [];
+                        state.stats = msg.stats || {};
+                        if (msg.games) populateGameFilter(msg.games);
+                        document.getElementById('headerTickers').textContent = msg.games ? msg.games.length : '--';
+                        renderAllTrades();
+                        renderStats();
+                        break;
+
+                    case 'trade':
+                        state.trades.unshift(msg.data);
+                        if (state.trades.length > 500) state.trades.pop();
+                        prependTrade(msg.data);
+                        // Quick inline stats update
+                        document.getElementById('headerTrades').textContent = formatNumber((state.stats.total_trades || 0) + 1);
+                        state.stats.total_trades = (state.stats.total_trades || 0) + 1;
+                        state.stats.total_dollar_volume = (state.stats.total_dollar_volume || 0) + msg.data.dollar_amount;
+                        state.stats.total_contracts = (state.stats.total_contracts || 0) + msg.data.count;
+                        document.getElementById('statTotalTrades').textContent = formatNumber(state.stats.total_trades);
+                        document.getElementById('statTotalContracts').textContent = formatNumber(state.stats.total_contracts);
+                        document.getElementById('statTotalVolume').textContent = formatDollar(state.stats.total_dollar_volume);
+                        document.getElementById('headerVolume').textContent = formatDollar(state.stats.total_dollar_volume);
+                        break;
+
+                    case 'stats_update':
+                        state.stats = msg.data;
+                        renderStats();
+                        break;
+
+                    case 'pong':
+                        break;
+                }
+            };
+
+            // Keepalive ping
+            setInterval(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'ping' }));
+                }
+            }, 30000);
+        }
+
+        // Start
+        connectWebSocket();
+    </script>
+</body>
+</html>
