@@ -273,6 +273,15 @@
             min-width: 70px;
             text-align: right;
         }
+        .trade-ev {
+            font-size: 13px;
+            font-weight: 700;
+            min-width: 60px;
+            text-align: right;
+        }
+        .trade-ev.positive { color: #22c55e; }
+        .trade-ev.negative { color: #ef4444; }
+        .trade-ev.neutral { color: #71717a; }
         .trade-time {
             font-size: 11px;
             color: #52525b;
@@ -625,6 +634,15 @@
             if (!animate) card.style.animation = 'none';
             if (!passesFilter(trade)) card.style.display = 'none';
 
+            let evHtml = '';
+            if (trade.ev_percent !== null && trade.ev_percent !== undefined) {
+                const evClass = trade.ev_percent > 0 ? 'positive' : trade.ev_percent < 0 ? 'negative' : 'neutral';
+                const evSign = trade.ev_percent > 0 ? '+' : '';
+                evHtml = `<div class="trade-ev ${evClass}">${evSign}${trade.ev_percent.toFixed(1)}%</div>`;
+            } else {
+                evHtml = `<div class="trade-ev neutral">--</div>`;
+            }
+
             card.innerHTML = `
                 <div class="trade-left">
                     <span class="trade-side-badge ${side}">${side}</span>
@@ -642,6 +660,7 @@
                         <div class="trade-contracts">${trade.count} contracts</div>
                     </div>
                     <div class="trade-dollar">${formatDollar(trade.dollar_amount)}</div>
+                    ${evHtml}
                     <div class="trade-time">${trade.time_str}</div>
                 </div>
             `;

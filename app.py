@@ -13,6 +13,7 @@ import base64
 import threading
 import re
 import os
+import requests
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
@@ -37,6 +38,8 @@ if KALSHI_PRIVATE_KEY is None:
 config.api_key_id = KALSHI_API_KEY_ID
 config.private_key_pem = KALSHI_PRIVATE_KEY
 client = KalshiClient(config)
+
+ODDS_API_KEY = "565cc76e6d85a1f7315d48a2ed9396ac"
 
 NBA_SERIES = ["KXNBAPTS", "KXNBAREB", "KXNBAAST", "KXNBA3PT"]
 PROP_TYPE_MAP = {
@@ -95,9 +98,11 @@ def discover_tickers():
                 # Parse player/line from title: "Player Name: 27+ points"
                 player = "Unknown"
                 line = ""
+                threshold = None
                 match = re.match(r'(.+?):\s*(\d+)\+\s*(points|rebounds|assists|threes)', market.title.lower())
                 if match:
                     player = match.group(1).strip().title()
+                    threshold = int(match.group(2))
                     line = f"{match.group(2)}+ {match.group(3)}"
 
                 # Game slug from ticker parts
@@ -109,6 +114,7 @@ def discover_tickers():
                     "player": player,
                     "prop_type": prop_type,
                     "line": line,
+                    "threshold": threshold,
                     "game_slug": game_slug,
                     "title": market.title,
                 }
@@ -116,6 +122,170 @@ def discover_tickers():
     ticker_cache.update(all_tickers, metadata, games)
     print(f"[TICKER] Discovered {len(all_tickers)} tickers across {len(games)} game slugs")
     return all_tickers
+
+
+# ============================================================
+# FANDUEL ODDS (for EV% calculation)
+# ============================================================
+
+_fanduel_cache = {}  # (player, stat_type, threshold, side) -> {price, is_alternate}
+_fanduel_lock = threading.Lock()
+
+PROP_TYPE_TO_STAT = {
+    "Points": "points",
+    "Rebounds": "rebounds",
+    "Assists": "assists",
+    "Threes": "threes",
+}
+
+
+def american_to_cents(decimal_odds):
+    if decimal_odds >= 2.0:
+        american = (decimal_odds - 1) * 100
+        implied_prob = 100 / (american + 100)
+        return round(implied_prob * 100, 2)
+    else:
+        american = -100 / (decimal_odds - 1)
+        implied_prob = abs(american) / (abs(american) + 100)
+        return round(implied_prob * 100, 2)
+
+
+def _fetch_event_odds(session, event_id):
+    base_url = "https://api.the-odds-api.com/v4"
+    odds_url = f"{base_url}/sports/basketball_nba/events/{event_id}/odds"
+    params = {
+        'apiKey': ODDS_API_KEY,
+        'regions': 'us',
+        'markets': 'player_points,player_rebounds,player_assists,player_threes,player_points_alternate,player_rebounds_alternate,player_assists_alternate,player_threes_alternate',
+        'bookmakers': 'fanduel'
+    }
+    try:
+        resp = session.get(odds_url, params=params, timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+    return None
+
+
+def fetch_fanduel_props():
+    """Fetch all FanDuel player props and update the cache."""
+    all_props = {}
+    try:
+        events_url = "https://api.the-odds-api.com/v4/sports/basketball_nba/events"
+        response = requests.get(events_url, params={'apiKey': ODDS_API_KEY}, timeout=30)
+        if response.status_code != 200:
+            print(f"[FANDUEL] Events fetch failed: {response.status_code}")
+            return
+
+        events = response.json()
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
+        session.mount('https://', adapter)
+
+        stat_type_map = {
+            'player_points': 'points', 'player_rebounds': 'rebounds',
+            'player_assists': 'assists', 'player_threes': 'threes',
+            'player_points_alternate': 'points', 'player_rebounds_alternate': 'rebounds',
+            'player_assists_alternate': 'assists', 'player_threes_alternate': 'threes',
+        }
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(events) or 1) as executor:
+            futures = {executor.submit(_fetch_event_odds, session, e['id']): e for e in events}
+            for future in concurrent.futures.as_completed(futures):
+                odds_data = future.result()
+                if not odds_data:
+                    continue
+                for bookmaker in odds_data.get('bookmakers', []):
+                    if bookmaker['key'] == 'fanduel':
+                        for market in bookmaker.get('markets', []):
+                            market_key = market['key']
+                            is_alternate = '_alternate' in market_key
+                            stat_type = stat_type_map.get(market_key)
+                            if not stat_type:
+                                continue
+                            for outcome in market.get('outcomes', []):
+                                player = outcome.get('description', '').lower()
+                                threshold = outcome.get('point')
+                                side = outcome.get('name', '')
+                                price = outcome.get('price')
+                                if not player or threshold is None:
+                                    continue
+                                key = (player, stat_type, threshold, side)
+                                if key not in all_props:
+                                    all_props[key] = {'price': price, 'is_alternate': is_alternate}
+                                elif all_props[key]['is_alternate'] and not is_alternate:
+                                    all_props[key] = {'price': price, 'is_alternate': is_alternate}
+
+        with _fanduel_lock:
+            global _fanduel_cache
+            _fanduel_cache = all_props
+        print(f"[FANDUEL] Cached {len(all_props)} FanDuel lines")
+
+    except Exception as e:
+        print(f"[FANDUEL] Error: {e}")
+
+
+def get_fanduel_under_price(player_name_lower, kalshi_threshold, stat_type):
+    with _fanduel_lock:
+        props = _fanduel_cache
+    if not props:
+        return None, None
+
+    target = kalshi_threshold - 0.5
+
+    under_key = (player_name_lower, stat_type, target, 'Under')
+    if under_key in props:
+        return american_to_cents(props[under_key]['price']), props[under_key].get('is_alternate')
+
+    over_key = (player_name_lower, stat_type, target, 'Over')
+    if over_key in props:
+        return 100 - american_to_cents(props[over_key]['price']), props[over_key].get('is_alternate')
+
+    for diff in [0.5, 1.0, 1.5, -0.5, -1.0, -1.5]:
+        ct = target + diff
+        uk = (player_name_lower, stat_type, ct, 'Under')
+        if uk in props:
+            return american_to_cents(props[uk]['price']), props[uk].get('is_alternate')
+        ok = (player_name_lower, stat_type, ct, 'Over')
+        if ok in props:
+            return 100 - american_to_cents(props[ok]['price']), props[ok].get('is_alternate')
+
+    return None, None
+
+
+def get_fanduel_over_price(player_name_lower, kalshi_threshold, stat_type):
+    with _fanduel_lock:
+        props = _fanduel_cache
+    if not props:
+        return None, None
+
+    target = kalshi_threshold - 0.5
+
+    over_key = (player_name_lower, stat_type, target, 'Over')
+    if over_key in props:
+        return american_to_cents(props[over_key]['price']), props[over_key].get('is_alternate')
+
+    under_key = (player_name_lower, stat_type, target, 'Under')
+    if under_key in props:
+        return 100 - american_to_cents(props[under_key]['price']), props[under_key].get('is_alternate')
+
+    for diff in [0.5, 1.0, 1.5, -0.5, -1.0, -1.5]:
+        ct = target + diff
+        ok = (player_name_lower, stat_type, ct, 'Over')
+        if ok in props:
+            return american_to_cents(props[ok]['price']), props[ok].get('is_alternate')
+        uk = (player_name_lower, stat_type, ct, 'Under')
+        if uk in props:
+            return 100 - american_to_cents(props[uk]['price']), props[uk].get('is_alternate')
+
+    return None, None
+
+
+def calculate_ev(kalshi_price, fanduel_price):
+    if fanduel_price == 0:
+        return 0
+    return round(((fanduel_price - kalshi_price) / fanduel_price) * 100, 2)
 
 
 # ============================================================
@@ -293,6 +463,21 @@ class TradeStore:
         ts = raw_trade.get('ts', 0)
         time_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%H:%M:%S') if ts else ''
 
+        # EV% calculation
+        ev_percent = None
+        fanduel_price = None
+        threshold = meta.get('threshold')
+        stat_type = PROP_TYPE_TO_STAT.get(meta['prop_type'])
+        if threshold is not None and stat_type:
+            player_lower = meta['player'].lower()
+            if taker_side == 'yes':
+                fd_price, _ = get_fanduel_over_price(player_lower, threshold, stat_type)
+            else:
+                fd_price, _ = get_fanduel_under_price(player_lower, threshold, stat_type)
+            if fd_price is not None and fd_price > 0:
+                fanduel_price = round(fd_price, 2)
+                ev_percent = calculate_ev(price_paid, fanduel_price)
+
         enriched = {
             'trade_id': raw_trade.get('trade_id', ''),
             'ticker': ticker,
@@ -306,6 +491,8 @@ class TradeStore:
             'no_price': no_price,
             'count': count,
             'dollar_amount': dollar_amount,
+            'ev_percent': ev_percent,
+            'fanduel_price': fanduel_price,
             'ts': ts,
             'time_str': time_str,
         }
@@ -492,6 +679,8 @@ async def bootstrap():
         if not tickers:
             print("[STARTUP] No tickers found, will retry on refresh")
             return
+        # Fetch FanDuel props for EV% calculation
+        await asyncio.to_thread(fetch_fanduel_props)
         trade_ws.on_trade_callback = on_trade
         await asyncio.to_thread(trade_ws.connect)
         await asyncio.to_thread(trade_ws.subscribe, tickers)
@@ -512,12 +701,22 @@ async def periodic_ticker_refresh():
             print(f"[REFRESH] Failed: {e}")
 
 
+async def periodic_fanduel_refresh():
+    while True:
+        await asyncio.sleep(60)  # every 60 seconds
+        try:
+            await asyncio.to_thread(fetch_fanduel_props)
+        except Exception as e:
+            print(f"[FANDUEL REFRESH] Failed: {e}")
+
+
 @app.on_event("startup")
 async def startup_event():
     global _event_loop
     _event_loop = asyncio.get_running_loop()
     asyncio.create_task(bootstrap())
     asyncio.create_task(periodic_ticker_refresh())
+    asyncio.create_task(periodic_fanduel_refresh())
 
 
 # ============================================================
