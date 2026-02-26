@@ -507,9 +507,9 @@ class TradeStore:
 
         return enriched
 
-    def get_stats(self):
+    def get_stats(self, window_seconds=None):
         with self.lock:
-            cutoff = time.time() - self.STATS_WINDOW
+            cutoff = time.time() - (window_seconds or self.STATS_WINDOW)
             volume_by_player = defaultdict(lambda: {"count": 0, "contracts": 0, "dollar_volume": 0.0})
             volume_by_prop_type = defaultdict(lambda: {"count": 0, "contracts": 0, "dollar_volume": 0.0})
             volume_by_ticker = defaultdict(lambda: {"count": 0, "contracts": 0, "dollar_volume": 0.0})
@@ -600,8 +600,8 @@ async def home():
 
 
 @app.get("/api/stats")
-async def get_stats():
-    return trade_store.get_stats()
+async def get_stats(window: int = None):
+    return trade_store.get_stats(window_seconds=window)
 
 
 @app.get("/api/health")
