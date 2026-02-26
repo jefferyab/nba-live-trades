@@ -348,10 +348,13 @@ class TradeWebSocket:
         if old_tickers:
             threading.Thread(target=self._reconnect, args=(old_tickers,), daemon=True).start()
 
-    def _reconnect(self, tickers, max_retries=5):
-        for attempt in range(max_retries):
-            time.sleep(2 ** attempt)
-            print(f"[TRADE WS] Reconnect attempt {attempt + 1}/{max_retries}...")
+    def _reconnect(self, tickers):
+        attempt = 0
+        while True:
+            delay = min(2 ** attempt, 60)  # cap at 60s
+            time.sleep(delay)
+            attempt += 1
+            print(f"[TRADE WS] Reconnect attempt {attempt}...")
             try:
                 if self.connect():
                     self.subscribe(tickers)
@@ -359,7 +362,6 @@ class TradeWebSocket:
                     return
             except Exception as e:
                 print(f"[TRADE WS] Reconnect failed: {e}")
-        print("[TRADE WS] All reconnect attempts exhausted")
 
     def _on_open(self, ws):
         print('[TRADE WS] Connected!')
@@ -694,7 +696,18 @@ async def periodic_ticker_refresh():
         await asyncio.sleep(300)  # 5 minutes
         try:
             new_tickers = await asyncio.to_thread(discover_tickers)
-            if set(new_tickers) != trade_ws.subscribed_tickers:
+            if not new_tickers:
+                continue
+            # If WS is disconnected, reconnect before subscribing
+            if not trade_ws.connected:
+                print("[REFRESH] WS disconnected, reconnecting...")
+                connected = await asyncio.to_thread(trade_ws.connect)
+                if connected:
+                    await asyncio.to_thread(trade_ws.subscribe, new_tickers)
+                    print(f"[REFRESH] Reconnected and subscribed to {len(new_tickers)} tickers")
+                else:
+                    print("[REFRESH] Reconnect failed, will retry next cycle")
+            elif set(new_tickers) != trade_ws.subscribed_tickers:
                 await asyncio.to_thread(trade_ws.resubscribe, new_tickers)
                 print(f"[REFRESH] Updated subscription to {len(new_tickers)} tickers")
         except Exception as e:
