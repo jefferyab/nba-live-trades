@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from pathlib import Path
 from kalshi_python import Configuration, KalshiClient
@@ -13,6 +13,7 @@ import base64
 import threading
 import re
 import os
+import sqlite3
 import requests
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -434,19 +435,67 @@ class TradeWebSocket:
 
 
 # ============================================================
-# TRADE STORE (in-memory)
+# TRADE STORE (SQLite-backed with in-memory cache)
 # ============================================================
 
+DATA_DIR = os.environ.get("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+
+TRADE_COLUMNS = [
+    'trade_id', 'ticker', 'player', 'prop_type', 'line', 'title',
+    'game_slug', 'taker_side', 'yes_price', 'no_price', 'count',
+    'dollar_amount', 'ev_percent', 'fanduel_price', 'ts', 'time_str',
+]
+
+
 class TradeStore:
-    MAX_TRADES = 10000
-    STATS_WINDOW = 6 * 3600  # 6 hours in seconds
+    STATS_WINDOW = 6 * 3600  # 6 hours default
+    MAX_AGE = 24 * 3600      # 24 hours retention
 
     def __init__(self):
-        self.trades = deque(maxlen=self.MAX_TRADES)
+        db_path = os.path.join(DATA_DIR, "trades.db")
+        self.db = sqlite3.connect(db_path, check_same_thread=False)
+        self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA journal_mode=WAL")
         self.lock = threading.Lock()
-        self.total_trades = 0
-        self.total_contracts = 0
-        self.total_dollar_volume = 0.0
+        self._trade_count = 0  # session counter for broadcast cadence
+        self._create_table()
+        # In-memory cache for fast WebSocket bootstrap
+        self.recent_trades = deque(maxlen=500)
+        self._load_recent()
+
+    def _create_table(self):
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
+                trade_id TEXT PRIMARY KEY,
+                ticker TEXT,
+                player TEXT,
+                prop_type TEXT,
+                line TEXT,
+                title TEXT,
+                game_slug TEXT,
+                taker_side TEXT,
+                yes_price INTEGER,
+                no_price INTEGER,
+                count INTEGER,
+                dollar_amount REAL,
+                ev_percent REAL,
+                fanduel_price REAL,
+                ts REAL,
+                time_str TEXT
+            )
+        """)
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(ts)")
+        self.db.commit()
+
+    def _load_recent(self):
+        cutoff = time.time() - self.MAX_AGE
+        rows = self.db.execute(
+            "SELECT * FROM trades WHERE ts >= ? ORDER BY ts DESC LIMIT 500",
+            (cutoff,)
+        ).fetchall()
+        for row in rows:
+            self.recent_trades.append(dict(row))
+        print(f"[DB] Loaded {len(rows)} trades from disk")
 
     def process_trade(self, raw_trade):
         ticker = raw_trade.get('market_ticker', '')
@@ -500,81 +549,112 @@ class TradeStore:
         }
 
         with self.lock:
-            self.trades.appendleft(enriched)
-            self.total_trades += 1
-            self.total_contracts += count
-            self.total_dollar_volume += dollar_amount
+            try:
+                self.db.execute(
+                    f"INSERT OR IGNORE INTO trades ({','.join(TRADE_COLUMNS)}) VALUES ({','.join('?' * len(TRADE_COLUMNS))})",
+                    tuple(enriched[c] for c in TRADE_COLUMNS)
+                )
+                self.db.commit()
+            except Exception as e:
+                print(f"[DB] Insert error: {e}")
+            self.recent_trades.appendleft(enriched)
+            self._trade_count += 1
 
         return enriched
 
     def get_stats(self, window_seconds=None):
+        window = window_seconds or self.STATS_WINDOW
+        cutoff = time.time() - window
+
         with self.lock:
-            cutoff = time.time() - (window_seconds or self.STATS_WINDOW)
-            volume_by_player = defaultdict(lambda: {"count": 0, "contracts": 0, "dollar_volume": 0.0})
-            volume_by_prop_type = defaultdict(lambda: {"count": 0, "contracts": 0, "dollar_volume": 0.0})
-            volume_by_ticker = defaultdict(lambda: {"count": 0, "contracts": 0, "dollar_volume": 0.0})
-            window_trades = 0
-            window_contracts = 0
-            window_volume = 0.0
+            rows = self.db.execute(
+                "SELECT player, prop_type, ticker, count, dollar_amount FROM trades WHERE ts >= ?",
+                (cutoff,)
+            ).fetchall()
 
-            for trade in self.trades:
-                if trade['ts'] < cutoff:
-                    break  # trades are newest-first, so we can stop
-                player = trade['player']
-                prop_type = trade['prop_type']
-                ticker = trade['ticker']
-                contracts = trade['count']
-                dollars = trade['dollar_amount']
+        volume_by_player = defaultdict(lambda: {"count": 0, "contracts": 0, "dollar_volume": 0.0})
+        volume_by_prop_type = defaultdict(lambda: {"count": 0, "contracts": 0, "dollar_volume": 0.0})
+        volume_by_ticker = defaultdict(lambda: {"count": 0, "contracts": 0, "dollar_volume": 0.0})
+        window_trades = 0
+        window_contracts = 0
+        window_volume = 0.0
 
-                volume_by_player[player]['count'] += 1
-                volume_by_player[player]['contracts'] += contracts
-                volume_by_player[player]['dollar_volume'] += dollars
+        for row in rows:
+            player = row['player']
+            prop_type = row['prop_type']
+            ticker = row['ticker']
+            contracts = row['count']
+            dollars = row['dollar_amount']
 
-                volume_by_prop_type[prop_type]['count'] += 1
-                volume_by_prop_type[prop_type]['contracts'] += contracts
-                volume_by_prop_type[prop_type]['dollar_volume'] += dollars
+            volume_by_player[player]['count'] += 1
+            volume_by_player[player]['contracts'] += contracts
+            volume_by_player[player]['dollar_volume'] += dollars
 
-                volume_by_ticker[ticker]['count'] += 1
-                volume_by_ticker[ticker]['contracts'] += contracts
-                volume_by_ticker[ticker]['dollar_volume'] += dollars
+            volume_by_prop_type[prop_type]['count'] += 1
+            volume_by_prop_type[prop_type]['contracts'] += contracts
+            volume_by_prop_type[prop_type]['dollar_volume'] += dollars
 
-                window_trades += 1
-                window_contracts += contracts
-                window_volume += dollars
+            volume_by_ticker[ticker]['count'] += 1
+            volume_by_ticker[ticker]['contracts'] += contracts
+            volume_by_ticker[ticker]['dollar_volume'] += dollars
 
-            top_players = sorted(
-                volume_by_player.items(),
-                key=lambda x: x[1]['dollar_volume'], reverse=True
-            )[:10]
+            window_trades += 1
+            window_contracts += contracts
+            window_volume += dollars
 
-            top_markets = sorted(
-                volume_by_ticker.items(),
-                key=lambda x: x[1]['dollar_volume'], reverse=True
-            )[:10]
+        top_players = sorted(
+            volume_by_player.items(),
+            key=lambda x: x[1]['dollar_volume'], reverse=True
+        )[:10]
 
-            top_markets_enriched = []
-            for ticker, vol in top_markets:
-                meta = ticker_cache.metadata.get(ticker, {})
-                top_markets_enriched.append({
-                    'ticker': ticker,
-                    'title': meta.get('title', ticker),
-                    'player': meta.get('player', ''),
-                    'prop_type': meta.get('prop_type', ''),
-                    **vol,
-                })
+        top_markets = sorted(
+            volume_by_ticker.items(),
+            key=lambda x: x[1]['dollar_volume'], reverse=True
+        )[:10]
 
-            return {
-                'total_trades': window_trades,
-                'total_contracts': window_contracts,
-                'total_dollar_volume': round(window_volume, 2),
-                'top_players': [{'player': p, **dict(v)} for p, v in top_players],
-                'volume_by_prop_type': {k: dict(v) for k, v in volume_by_prop_type.items()},
-                'top_markets': top_markets_enriched,
-            }
+        top_markets_enriched = []
+        for ticker, vol in top_markets:
+            meta = ticker_cache.metadata.get(ticker, {})
+            top_markets_enriched.append({
+                'ticker': ticker,
+                'title': meta.get('title', ticker),
+                'player': meta.get('player', ''),
+                'prop_type': meta.get('prop_type', ''),
+                **vol,
+            })
+
+        return {
+            'total_trades': window_trades,
+            'total_contracts': window_contracts,
+            'total_dollar_volume': round(window_volume, 2),
+            'top_players': [{'player': p, **dict(v)} for p, v in top_players],
+            'volume_by_prop_type': {k: dict(v) for k, v in volume_by_prop_type.items()},
+            'top_markets': top_markets_enriched,
+        }
 
     def get_recent_trades(self, limit=100):
         with self.lock:
-            return list(self.trades)[:limit]
+            return list(self.recent_trades)[:limit]
+
+    def get_trades_before(self, before_ts, limit=100):
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT * FROM trades WHERE ts < ? ORDER BY ts DESC LIMIT ?",
+                (before_ts, limit)
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def cleanup(self):
+        cutoff = time.time() - self.MAX_AGE
+        with self.lock:
+            result = self.db.execute("DELETE FROM trades WHERE ts < ?", (cutoff,))
+            self.db.commit()
+            deleted = result.rowcount
+            # Trim in-memory cache
+            while self.recent_trades and self.recent_trades[-1]['ts'] < cutoff:
+                self.recent_trades.pop()
+        if deleted:
+            print(f"[DB] Cleaned up {deleted} trades older than 24h")
 
 
 # ============================================================
@@ -604,13 +684,20 @@ async def get_stats(window: int = None):
     return trade_store.get_stats(window_seconds=window)
 
 
+@app.get("/api/trades")
+async def get_trades(before_ts: float = None, limit: int = Query(default=100, le=500)):
+    if before_ts is None:
+        return trade_store.get_recent_trades(limit)
+    return trade_store.get_trades_before(before_ts, limit)
+
+
 @app.get("/api/health")
 async def health():
     return {
         "status": "ok",
         "ws_connected": trade_ws.connected,
         "subscribed_tickers": len(trade_ws.subscribed_tickers),
-        "total_trades": trade_store.total_trades,
+        "total_trades": trade_store._trade_count,
         "connected_clients": len(connected_clients),
     }
 
@@ -662,7 +749,7 @@ async def broadcast_trade(trade):
             pass
 
     # Broadcast stats every 10th trade
-    if trade_store.total_trades % 10 == 0:
+    if trade_store._trade_count % 10 == 0:
         stats_msg = json.dumps({'type': 'stats_update', 'data': trade_store.get_stats()})
         for client in connected_clients[:]:
             try:
@@ -723,13 +810,24 @@ async def periodic_fanduel_refresh():
             print(f"[FANDUEL REFRESH] Failed: {e}")
 
 
+async def periodic_trade_cleanup():
+    while True:
+        await asyncio.sleep(1800)  # every 30 minutes
+        try:
+            await asyncio.to_thread(trade_store.cleanup)
+        except Exception as e:
+            print(f"[CLEANUP] Failed: {e}")
+
+
 @app.on_event("startup")
 async def startup_event():
     global _event_loop
     _event_loop = asyncio.get_running_loop()
+    trade_store.cleanup()  # clean stale data on startup
     asyncio.create_task(bootstrap())
     asyncio.create_task(periodic_ticker_refresh())
     asyncio.create_task(periodic_fanduel_refresh())
+    asyncio.create_task(periodic_trade_cleanup())
 
 
 # ============================================================

@@ -538,6 +538,8 @@
                 games: new Set(), // empty = all games
             },
             statsWindow: 21600, // 6h default
+            loadingMore: false,
+            allLoaded: false,
             connected: false,
         };
 
@@ -742,11 +744,6 @@
 
             const card = createTradeCard(trade, 0, true);
             feedPanel.insertBefore(card, feedPanel.firstChild);
-
-            // Cap DOM nodes at 500
-            while (feedPanel.children.length > 500) {
-                feedPanel.removeChild(feedPanel.lastChild);
-            }
         }
 
         function renderStats() {
@@ -869,7 +866,6 @@
 
                     case 'trade':
                         state.trades.unshift(msg.data);
-                        if (state.trades.length > 500) state.trades.pop();
                         prependTrade(msg.data);
                         // Quick inline stats update
                         document.getElementById('headerTrades').textContent = formatNumber((state.stats.total_trades || 0) + 1);
@@ -901,6 +897,63 @@
                     ws.send(JSON.stringify({ type: 'ping' }));
                 }
             }, 30000);
+        }
+
+        // ============================================================
+        // INFINITE SCROLL
+        // ============================================================
+        const feedPanel = document.getElementById('feedPanel');
+        feedPanel.addEventListener('scroll', () => {
+            if (state.loadingMore || state.allLoaded) return;
+            if (feedPanel.scrollTop + feedPanel.clientHeight >= feedPanel.scrollHeight - 200) {
+                loadMoreTrades();
+            }
+        });
+
+        async function loadMoreTrades() {
+            if (state.trades.length === 0) return;
+            state.loadingMore = true;
+
+            // Show loading indicator
+            let loader = document.getElementById('feedLoader');
+            if (!loader) {
+                loader = document.createElement('div');
+                loader.id = 'feedLoader';
+                loader.style.cssText = 'text-align:center;padding:12px;color:#71717a;font-size:13px;';
+                loader.textContent = 'Loading more trades...';
+            }
+            feedPanel.appendChild(loader);
+
+            try {
+                const oldestTs = state.trades[state.trades.length - 1].ts;
+                const resp = await fetch(`/api/trades?before_ts=${oldestTs}&limit=100`);
+                if (!resp.ok) return;
+                const older = await resp.json();
+
+                if (older.length === 0) {
+                    state.allLoaded = true;
+                    loader.textContent = 'All trades loaded';
+                    return;
+                }
+
+                const startIdx = state.trades.length;
+                older.forEach((trade, i) => {
+                    state.trades.push(trade);
+                    const card = createTradeCard(trade, startIdx + i, false);
+                    feedPanel.insertBefore(card, loader);
+                });
+
+                if (older.length < 100) {
+                    state.allLoaded = true;
+                    loader.textContent = 'All trades loaded';
+                } else {
+                    loader.remove();
+                }
+            } catch (e) {
+                loader.textContent = 'Failed to load more';
+            } finally {
+                state.loadingMore = false;
+            }
         }
 
         // Start
