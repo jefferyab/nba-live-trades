@@ -14,6 +14,7 @@ import threading
 import re
 import os
 import sqlite3
+import unicodedata
 import requests
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -43,6 +44,36 @@ client = KalshiClient(config)
 ODDS_API_KEY = "565cc76e6d85a1f7315d48a2ed9396ac"
 
 NBA_SERIES = ["KXNBAPTS", "KXNBAREB", "KXNBAAST", "KXNBA3PT"]
+
+# ============================================================
+# NAME NORMALIZATION
+# ============================================================
+
+_SUFFIX_RE = re.compile(r'\s+(jr\.?|sr\.?|iii|ii|iv)$', re.IGNORECASE)
+
+_NAME_ALIASES = {
+    'nicolas claxton': 'nic claxton',
+    'cameron johnson': 'cam johnson',
+    'cameron thomas': 'cam thomas',
+    'herbert jones': 'herb jones',
+    'kenyon martin': 'kenyon martin',
+    'alexandre sarr': 'alex sarr',
+    'carlton carrington': 'bub carrington',
+    'nicholas richards': 'nick richards',
+    'timothy hardaway': 'tim hardaway',
+    'ronald holland': 'ron holland',
+    'gregory jackson': 'gg jackson',
+    'jakob poeltl': 'jakob poltl',
+}
+
+def normalize_name(name):
+    """Normalize player name: strip accents/periods, remove suffixes, lowercase, resolve aliases."""
+    nfkd = unicodedata.normalize('NFKD', name)
+    ascii_name = ''.join(c for c in nfkd if not unicodedata.combining(c))
+    ascii_name = ascii_name.replace('.', '')
+    ascii_name = ascii_name.lower().strip()
+    ascii_name = _SUFFIX_RE.sub('', ascii_name).strip()
+    return _NAME_ALIASES.get(ascii_name, ascii_name)
 PROP_TYPE_MAP = {
     "KXNBAPTS": "Points",
     "KXNBAREB": "Rebounds",
@@ -102,7 +133,7 @@ def discover_tickers():
                 threshold = None
                 match = re.match(r'(.+?):\s*(\d+)\+\s*(points|rebounds|assists|threes)', market.title.lower())
                 if match:
-                    player = match.group(1).strip().title()
+                    player = normalize_name(match.group(1)).title()
                     threshold = int(match.group(2))
                     line = f"{match.group(2)}+ {match.group(3)}"
 
@@ -206,7 +237,7 @@ def fetch_fanduel_props():
                             if not stat_type:
                                 continue
                             for outcome in market.get('outcomes', []):
-                                player = outcome.get('description', '').lower()
+                                player = normalize_name(outcome.get('description', ''))
                                 threshold = outcome.get('point')
                                 side = outcome.get('name', '')
                                 price = outcome.get('price')
@@ -520,7 +551,7 @@ class TradeStore:
         threshold = meta.get('threshold')
         stat_type = PROP_TYPE_TO_STAT.get(meta['prop_type'])
         if threshold is not None and stat_type:
-            player_lower = meta['player'].lower()
+            player_lower = normalize_name(meta['player'])
             if taker_side == 'yes':
                 fd_price, _ = get_fanduel_over_price(player_lower, threshold, stat_type)
             else:
