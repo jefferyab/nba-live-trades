@@ -3,6 +3,9 @@ from fastapi.responses import HTMLResponse
 from pathlib import Path
 from kalshi_python import Configuration, KalshiClient
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
+
+_PACIFIC = ZoneInfo("America/Los_Angeles")
 from collections import defaultdict, deque
 import asyncio
 import concurrent.futures
@@ -578,7 +581,7 @@ class TradeStore:
         dollar_amount = round(price_paid * count / 100, 2)
 
         ts = raw_trade.get('ts', 0)
-        time_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%H:%M:%S') if ts else ''
+        time_str = datetime.fromtimestamp(ts, tz=_PACIFIC).strftime('%H:%M:%S') if ts else ''
 
         # EV% calculation
         ev_percent = None
