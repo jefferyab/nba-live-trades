@@ -449,6 +449,33 @@
             font-size: 11px;
             color: #71717a;
         }
+        .cheap-no-dismiss {
+            background: none;
+            border: none;
+            color: #52525b;
+            cursor: pointer;
+            font-size: 14px;
+            padding: 2px 4px;
+            line-height: 1;
+            border-radius: 3px;
+        }
+        .cheap-no-dismiss:hover {
+            color: #ef4444;
+            background: rgba(239, 68, 68, 0.1);
+        }
+        .unhide-btn {
+            background: none;
+            border: 1px solid #3f3f46;
+            color: #a1a1aa;
+            font-size: 11px;
+            padding: 3px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .unhide-btn:hover {
+            color: #fff;
+            border-color: #6366f1;
+        }
 
         @media (max-width: 900px) {
             .main { flex-direction: column; height: auto; }
@@ -523,7 +550,10 @@
         <div class="stats-panel">
             <!-- Cheap NO Contracts -->
             <div class="stats-section">
-                <div class="stats-section-title">Cheap NO Contracts (&le;10&cent;)</div>
+                <div style="display:flex;align-items:center;justify-content:space-between;">
+                    <div class="stats-section-title" style="margin-bottom:0;">Cheap NO Contracts (&le;10&cent;)</div>
+                    <button class="unhide-btn" id="unhideAllBtn" onclick="state.hiddenTickers.clear();renderCheapNos();" style="display:none;">Unhide all</button>
+                </div>
                 <div class="cheap-nos-feed" id="cheapNosFeed">
                     <div style="color: #52525b; font-size: 13px;">Scanning orderbooks...</div>
                 </div>
@@ -602,6 +632,7 @@
                 games: new Set(), // empty = all games
             },
             cheapNos: [],
+            hiddenTickers: new Set(),
             statsWindow: 21600, // 6h default
             loadingMore: false,
             allLoaded: false,
@@ -878,9 +909,13 @@
 
         function renderCheapNos() {
             const container = document.getElementById('cheapNosFeed');
-            const items = state.cheapNos;
-            if (!items || items.length === 0) {
-                container.innerHTML = '<div style="color: #52525b; font-size: 13px;">No cheap NO contracts found</div>';
+            const unhideBtn = document.getElementById('unhideAllBtn');
+            const items = (state.cheapNos || []).filter(item => !state.hiddenTickers.has(item.ticker));
+            unhideBtn.style.display = state.hiddenTickers.size > 0 ? '' : 'none';
+            if (items.length === 0) {
+                container.innerHTML = state.hiddenTickers.size > 0
+                    ? '<div style="color: #52525b; font-size: 13px;">All contracts hidden</div>'
+                    : '<div style="color: #52525b; font-size: 13px;">No cheap NO contracts found</div>';
                 return;
             }
             container.innerHTML = items.map(item => {
@@ -897,6 +932,7 @@
                     <div class="cheap-no-right">
                         <span class="cheap-no-price">${item.no_price}&cent;</span>
                         <span class="cheap-no-qty">&times;${item.quantity}</span>
+                        <button class="cheap-no-dismiss" onclick="state.hiddenTickers.add('${item.ticker}');renderCheapNos();" title="Hide">&times;</button>
                     </div>
                 </div>`;
             }).join('');
