@@ -535,6 +535,20 @@
                 <button class="toggle-btn active" data-value="all">All</button>
             </div>
         </div>
+
+        <div class="filter-group">
+            <span class="filter-label">Time Range</span>
+            <div class="toggle-group" id="statsTimeRange" style="flex-wrap: wrap;">
+                <button class="toggle-btn" data-value="300">5m</button>
+                <button class="toggle-btn" data-value="900">15m</button>
+                <button class="toggle-btn" data-value="1800">30m</button>
+                <button class="toggle-btn" data-value="3600">1h</button>
+                <button class="toggle-btn" data-value="10800">3h</button>
+                <button class="toggle-btn active" data-value="21600">6h</button>
+                <button class="toggle-btn" data-value="43200">12h</button>
+                <button class="toggle-btn" data-value="86400">24h</button>
+            </div>
+        </div>
     </div>
 
     <!-- Main Content -->
@@ -556,23 +570,6 @@
                 </div>
                 <div class="cheap-nos-feed" id="cheapNosFeed">
                     <div style="color: #52525b; font-size: 13px;">Scanning orderbooks...</div>
-                </div>
-            </div>
-
-            <!-- Time Range Filter -->
-            <div style="margin-bottom: 16px;">
-                <div class="filter-group" style="justify-content: space-between;">
-                    <span class="filter-label">Time Range</span>
-                    <div class="toggle-group" id="statsTimeRange" style="flex-wrap: wrap;">
-                        <button class="toggle-btn" data-value="300">5m</button>
-                        <button class="toggle-btn" data-value="900">15m</button>
-                        <button class="toggle-btn" data-value="1800">30m</button>
-                        <button class="toggle-btn" data-value="3600">1h</button>
-                        <button class="toggle-btn" data-value="10800">3h</button>
-                        <button class="toggle-btn active" data-value="21600">6h</button>
-                        <button class="toggle-btn" data-value="43200">12h</button>
-                        <button class="toggle-btn" data-value="86400">24h</button>
-                    </div>
                 </div>
             </div>
 
