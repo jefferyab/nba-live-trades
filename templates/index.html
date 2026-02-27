@@ -498,10 +498,10 @@
                 </div>
             </div>
 
-            <!-- Top Players -->
+            <!-- Hot Markets -->
             <div class="stats-section">
-                <div class="stats-section-title">Top Players by Volume</div>
-                <div id="topPlayers">
+                <div class="stats-section-title">Hot Markets</div>
+                <div id="hotMarkets">
                     <div style="color: #52525b; font-size: 13px;">No data yet</div>
                 </div>
             </div>
@@ -514,10 +514,10 @@
                 </div>
             </div>
 
-            <!-- Hot Markets -->
+            <!-- Top Trades -->
             <div class="stats-section">
-                <div class="stats-section-title">Hot Markets</div>
-                <div id="hotMarkets">
+                <div class="stats-section-title">Top Trades</div>
+                <div id="topTrades">
                     <div style="color: #52525b; font-size: 13px;">No data yet</div>
                 </div>
             </div>
@@ -756,16 +756,24 @@
             document.getElementById('headerTrades').textContent = formatNumber(s.total_trades);
             document.getElementById('headerVolume').textContent = formatDollar(s.total_dollar_volume);
 
-            // Top Players
-            const playersEl = document.getElementById('topPlayers');
-            if (s.top_players && s.top_players.length > 0) {
-                playersEl.innerHTML = s.top_players.map((p, i) => `
+            // Top Trades
+            const tradesEl = document.getElementById('topTrades');
+            if (s.top_trades && s.top_trades.length > 0) {
+                tradesEl.innerHTML = s.top_trades.map((t, i) => {
+                    const side = t.taker_side;
+                    const price = side === 'yes' ? `${t.yes_price}\u00A2` : `${t.no_price}\u00A2`;
+                    const sideColor = side === 'yes' ? '#22c55e' : '#ef4444';
+                    const propClass = t.prop_type.toLowerCase();
+                    return `
                     <div class="stat-row">
                         <span class="stat-rank">${i + 1}</span>
-                        <span class="stat-name">${p.player}</span>
-                        <span class="stat-volume">${formatDollar(p.dollar_volume)}</span>
-                    </div>
-                `).join('');
+                        <span class="stat-name">
+                            ${t.player} <span class="prop-badge ${propClass}" style="margin-left:4px;">${t.prop_type}</span>
+                            <span style="color:#71717a;margin-left:4px;">${t.count}ct @ ${price} <span style="color:${sideColor};font-weight:600;">${side.toUpperCase()}</span></span>
+                        </span>
+                        <span class="stat-volume">${formatDollar(t.dollar_amount)} <span style="color:#52525b;font-weight:400;font-size:11px;">${t.time_str}</span></span>
+                    </div>`;
+                }).join('');
             }
 
             // Volume by Prop Type
@@ -797,7 +805,7 @@
                     <div class="stat-row">
                         <span class="stat-rank">${i + 1}</span>
                         <span class="stat-name">${m.title || m.ticker}</span>
-                        <span class="stat-volume">${formatDollar(m.dollar_volume)}</span>
+                        <span class="stat-volume">${formatDollar(m.dollar_volume)} <span style="color:#71717a;font-weight:400;">(${m.count})</span></span>
                     </div>
                 `).join('');
             }

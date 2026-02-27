@@ -572,7 +572,6 @@ class TradeStore:
                 (cutoff,)
             ).fetchall()
 
-        volume_by_player = defaultdict(lambda: {"count": 0, "contracts": 0, "dollar_volume": 0.0})
         volume_by_prop_type = defaultdict(lambda: {"count": 0, "contracts": 0, "dollar_volume": 0.0})
         volume_by_ticker = defaultdict(lambda: {"count": 0, "contracts": 0, "dollar_volume": 0.0})
         window_trades = 0
@@ -580,15 +579,10 @@ class TradeStore:
         window_volume = 0.0
 
         for row in rows:
-            player = row['player']
             prop_type = row['prop_type']
             ticker = row['ticker']
             contracts = row['count']
             dollars = row['dollar_amount']
-
-            volume_by_player[player]['count'] += 1
-            volume_by_player[player]['contracts'] += contracts
-            volume_by_player[player]['dollar_volume'] += dollars
 
             volume_by_prop_type[prop_type]['count'] += 1
             volume_by_prop_type[prop_type]['contracts'] += contracts
@@ -601,11 +595,6 @@ class TradeStore:
             window_trades += 1
             window_contracts += contracts
             window_volume += dollars
-
-        top_players = sorted(
-            volume_by_player.items(),
-            key=lambda x: x[1]['dollar_volume'], reverse=True
-        )[:10]
 
         top_markets = sorted(
             volume_by_ticker.items(),
@@ -623,11 +612,19 @@ class TradeStore:
                 **vol,
             })
 
+        # Top individual trades by dollar amount
+        with self.lock:
+            top_trade_rows = self.db.execute(
+                "SELECT player, title, prop_type, taker_side, yes_price, no_price, count, dollar_amount, time_str FROM trades WHERE ts >= ? ORDER BY dollar_amount DESC LIMIT 10",
+                (cutoff,)
+            ).fetchall()
+        top_trades = [dict(r) for r in top_trade_rows]
+
         return {
             'total_trades': window_trades,
             'total_contracts': window_contracts,
             'total_dollar_volume': round(window_volume, 2),
-            'top_players': [{'player': p, **dict(v)} for p, v in top_players],
+            'top_trades': top_trades,
             'volume_by_prop_type': {k: dict(v) for k, v in volume_by_prop_type.items()},
             'top_markets': top_markets_enriched,
         }
