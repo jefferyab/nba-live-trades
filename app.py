@@ -336,7 +336,10 @@ class TradeWebSocket:
         self.connected = False
         self.subscribed_tickers = set()
         self.on_trade_callback = None
+        self.on_orderbook_callback = None
         self.ws_thread = None
+        self.orderbooks = {}  # ticker -> {'yes': [...], 'no': [...]}
+        self.ob_lock = threading.Lock()
 
     def _generate_auth_headers(self):
         timestamp_str = str(int(datetime.now().timestamp() * 1000))
@@ -362,11 +365,41 @@ class TradeWebSocket:
 
     def _on_message(self, ws, message):
         data = json.loads(message)
-        if data.get('type') == 'trade' and self.on_trade_callback:
+        msg_type = data.get('type')
+
+        if msg_type == 'trade' and self.on_trade_callback:
             try:
                 self.on_trade_callback(data['msg'])
             except Exception as e:
                 print(f"[TRADE WS] Callback error: {e}")
+
+        elif msg_type == 'orderbook_snapshot':
+            ticker = data['msg'].get('market_ticker')
+            with self.ob_lock:
+                self.orderbooks[ticker] = {
+                    'yes': data['msg'].get('yes', []),
+                    'no': data['msg'].get('no', []),
+                }
+            if self.on_orderbook_callback:
+                try:
+                    self.on_orderbook_callback(ticker)
+                except Exception as e:
+                    print(f"[TRADE WS] OB snapshot callback error: {e}")
+
+        elif msg_type == 'orderbook_delta':
+            ticker = data['msg'].get('market_ticker')
+            with self.ob_lock:
+                if ticker in self.orderbooks:
+                    delta = data['msg']
+                    if 'yes' in delta:
+                        self.orderbooks[ticker]['yes'] = delta['yes']
+                    if 'no' in delta:
+                        self.orderbooks[ticker]['no'] = delta['no']
+            if self.on_orderbook_callback:
+                try:
+                    self.on_orderbook_callback(ticker)
+                except Exception as e:
+                    print(f"[TRADE WS] OB delta callback error: {e}")
 
     def _on_error(self, ws, error):
         print(f'[TRADE WS] Error: {error}')
@@ -429,17 +462,19 @@ class TradeWebSocket:
     def subscribe(self, tickers):
         if not tickers:
             return
+        ticker_list = list(tickers)
+        # Subscribe to both trade and orderbook_delta channels
         msg = {
             'id': int(time.time()),
             'cmd': 'subscribe',
             'params': {
-                'channels': ['trade'],
-                'market_tickers': list(tickers)
+                'channels': ['trade', 'orderbook_delta'],
+                'market_tickers': ticker_list
             }
         }
         self.ws.send(json.dumps(msg))
         self.subscribed_tickers = set(tickers)
-        print(f"[TRADE WS] Subscribed to trade channel for {len(tickers)} tickers")
+        print(f"[TRADE WS] Subscribed to trade + orderbook_delta for {len(ticker_list)} tickers")
 
     def resubscribe(self, tickers):
         if self.subscribed_tickers:
@@ -448,7 +483,7 @@ class TradeWebSocket:
                     'id': int(time.time()),
                     'cmd': 'unsubscribe',
                     'params': {
-                        'channels': ['trade'],
+                        'channels': ['trade', 'orderbook_delta'],
                         'market_tickers': list(self.subscribed_tickers)
                     }
                 }
@@ -735,14 +770,12 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     connected_clients.append(websocket)
     try:
-        with _cheap_nos_lock:
-            cheap_nos_snapshot = list(_cheap_nos)
         await websocket.send_text(json.dumps({
             'type': 'bootstrap',
             'trades': trade_store.get_recent_trades(100),
             'stats': trade_store.get_stats(),
             'games': sorted(list(ticker_cache.games)),
-            'cheap_nos': cheap_nos_snapshot,
+            'cheap_nos': _get_cheap_nos_list(),
         }))
         while True:
             data = await websocket.receive_text()
@@ -758,72 +791,85 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 # ============================================================
-# CHEAP NO CONTRACTS SCANNER
+# CHEAP NO CONTRACTS (WebSocket-driven orderbook state)
 # ============================================================
 
-_cheap_nos = []
+_cheap_nos = {}  # ticker -> {ticker, player, prop_type, line, game_slug, no_price, quantity}
 _cheap_nos_lock = threading.Lock()
 
 
-def _scan_cheap_nos():
-    """Fetch orderbooks for all tickers and find NO contracts available at ≤10¢."""
-    with ticker_cache.lock:
-        tickers = ticker_cache.tickers[:]
-        metadata = dict(ticker_cache.metadata)
+def _check_cheap_no(ticker):
+    """Check a single ticker's orderbook for cheap NO contracts. Returns entry or None."""
+    ob = None
+    with trade_ws.ob_lock:
+        if ticker in trade_ws.orderbooks:
+            ob = trade_ws.orderbooks[ticker]
+    if not ob:
+        return None
 
-    if not tickers:
-        return []
+    yes_bids = ob.get('yes', [])
+    total_qty = 0
+    best_no_price = None
+    for price, qty in yes_bids:
+        no_price = 100 - price
+        if no_price <= 10:
+            total_qty += qty
+            if best_no_price is None or no_price < best_no_price:
+                best_no_price = no_price
 
-    session = requests.Session()
-    adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
-    session.mount('https://', adapter)
+    if total_qty > 0:
+        meta = ticker_cache.metadata.get(ticker)
+        if meta:
+            return {
+                'ticker': ticker,
+                'player': meta['player'],
+                'prop_type': meta['prop_type'],
+                'line': meta['line'],
+                'game_slug': meta['game_slug'],
+                'no_price': best_no_price,
+                'quantity': total_qty,
+            }
+    return None
 
-    results = []
-    now = time.time()
 
-    def fetch_ob(ticker):
-        url = f"https://api.elections.kalshi.com/trade-api/v2/markets/{ticker}/orderbook"
+def _get_cheap_nos_list():
+    """Return sorted list from current cheap_nos dict."""
+    with _cheap_nos_lock:
+        items = list(_cheap_nos.values())
+    items.sort(key=lambda x: (x['no_price'], -x['quantity']))
+    return items
+
+
+def on_orderbook_update(ticker):
+    """Called from TradeWebSocket thread on every orderbook snapshot/delta."""
+    entry = _check_cheap_no(ticker)
+    changed = False
+    with _cheap_nos_lock:
+        if entry:
+            prev = _cheap_nos.get(ticker)
+            if prev != entry:
+                _cheap_nos[ticker] = entry
+                changed = True
+        else:
+            if ticker in _cheap_nos:
+                del _cheap_nos[ticker]
+                changed = True
+
+    if changed and _event_loop and connected_clients:
+        items = _get_cheap_nos_list()
+        _event_loop.call_soon_threadsafe(
+            asyncio.ensure_future,
+            _broadcast_cheap_nos(items)
+        )
+
+
+async def _broadcast_cheap_nos(items):
+    msg = json.dumps({'type': 'cheap_nos_update', 'data': items})
+    for client in connected_clients[:]:
         try:
-            resp = session.get(url, timeout=5)
-            if resp.status_code == 200:
-                return ticker, resp.json()
+            await client.send_text(msg)
         except Exception:
             pass
-        return ticker, None
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        futures = {executor.submit(fetch_ob, t): t for t in tickers}
-        for future in concurrent.futures.as_completed(futures):
-            ticker, data = future.result()
-            if not data:
-                continue
-            ob = data.get('orderbook', {})
-            yes_bids = ob.get('yes', [])
-
-            total_qty = 0
-            best_no_price = None
-            for price, qty in yes_bids:
-                no_price = 100 - price
-                if no_price <= 10:
-                    total_qty += qty
-                    if best_no_price is None or no_price < best_no_price:
-                        best_no_price = no_price
-
-            if total_qty > 0 and ticker in metadata:
-                meta = metadata[ticker]
-                results.append({
-                    'ticker': ticker,
-                    'player': meta['player'],
-                    'prop_type': meta['prop_type'],
-                    'line': meta['line'],
-                    'game_slug': meta['game_slug'],
-                    'no_price': best_no_price,
-                    'quantity': total_qty,
-                    'updated_at': now,
-                })
-
-    results.sort(key=lambda x: (x['no_price'], -x['quantity']))
-    return results
 
 
 # ============================================================
@@ -871,9 +917,10 @@ async def bootstrap():
         # Fetch FanDuel props for EV% calculation
         await asyncio.to_thread(fetch_fanduel_props)
         trade_ws.on_trade_callback = on_trade
+        trade_ws.on_orderbook_callback = on_orderbook_update
         await asyncio.to_thread(trade_ws.connect)
         await asyncio.to_thread(trade_ws.subscribe, tickers)
-        print(f"[STARTUP] Live trades feed active for {len(tickers)} NBA prop tickers")
+        print(f"[STARTUP] Live trades + orderbook feed active for {len(tickers)} NBA prop tickers")
     except Exception as e:
         print(f"[STARTUP] Bootstrap failed: {e}")
 
@@ -910,24 +957,6 @@ async def periodic_fanduel_refresh():
             print(f"[FANDUEL REFRESH] Failed: {e}")
 
 
-async def periodic_cheap_no_scan():
-    while True:
-        await asyncio.sleep(10)
-        try:
-            results = await asyncio.to_thread(_scan_cheap_nos)
-            with _cheap_nos_lock:
-                _cheap_nos[:] = results
-            if connected_clients:
-                msg = json.dumps({'type': 'cheap_nos_update', 'data': results})
-                for client in connected_clients[:]:
-                    try:
-                        await client.send_text(msg)
-                    except Exception:
-                        pass
-        except Exception as e:
-            print(f"[CHEAP NO] Scan error: {e}")
-
-
 async def periodic_trade_cleanup():
     while True:
         await asyncio.sleep(1800)  # every 30 minutes
@@ -946,7 +975,6 @@ async def startup_event():
     asyncio.create_task(periodic_ticker_refresh())
     asyncio.create_task(periodic_fanduel_refresh())
     asyncio.create_task(periodic_trade_cleanup())
-    asyncio.create_task(periodic_cheap_no_scan())
 
 
 # ============================================================
