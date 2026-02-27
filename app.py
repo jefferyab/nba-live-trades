@@ -735,11 +735,14 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     connected_clients.append(websocket)
     try:
+        with _cheap_nos_lock:
+            cheap_nos_snapshot = list(_cheap_nos)
         await websocket.send_text(json.dumps({
             'type': 'bootstrap',
             'trades': trade_store.get_recent_trades(100),
             'stats': trade_store.get_stats(),
             'games': sorted(list(ticker_cache.games)),
+            'cheap_nos': cheap_nos_snapshot,
         }))
         while True:
             data = await websocket.receive_text()
@@ -752,6 +755,75 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception:
         if websocket in connected_clients:
             connected_clients.remove(websocket)
+
+
+# ============================================================
+# CHEAP NO CONTRACTS SCANNER
+# ============================================================
+
+_cheap_nos = []
+_cheap_nos_lock = threading.Lock()
+
+
+def _scan_cheap_nos():
+    """Fetch orderbooks for all tickers and find NO contracts available at ≤10¢."""
+    with ticker_cache.lock:
+        tickers = ticker_cache.tickers[:]
+        metadata = dict(ticker_cache.metadata)
+
+    if not tickers:
+        return []
+
+    session = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
+    session.mount('https://', adapter)
+
+    results = []
+    now = time.time()
+
+    def fetch_ob(ticker):
+        url = f"https://api.elections.kalshi.com/trade-api/v2/markets/{ticker}/orderbook"
+        try:
+            resp = session.get(url, timeout=5)
+            if resp.status_code == 200:
+                return ticker, resp.json()
+        except Exception:
+            pass
+        return ticker, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        futures = {executor.submit(fetch_ob, t): t for t in tickers}
+        for future in concurrent.futures.as_completed(futures):
+            ticker, data = future.result()
+            if not data:
+                continue
+            ob = data.get('orderbook', {})
+            yes_bids = ob.get('yes', [])
+
+            total_qty = 0
+            best_no_price = None
+            for price, qty in yes_bids:
+                no_price = 100 - price
+                if no_price <= 10:
+                    total_qty += qty
+                    if best_no_price is None or no_price < best_no_price:
+                        best_no_price = no_price
+
+            if total_qty > 0 and ticker in metadata:
+                meta = metadata[ticker]
+                results.append({
+                    'ticker': ticker,
+                    'player': meta['player'],
+                    'prop_type': meta['prop_type'],
+                    'line': meta['line'],
+                    'game_slug': meta['game_slug'],
+                    'no_price': best_no_price,
+                    'quantity': total_qty,
+                    'updated_at': now,
+                })
+
+    results.sort(key=lambda x: (x['no_price'], -x['quantity']))
+    return results
 
 
 # ============================================================
@@ -838,6 +910,24 @@ async def periodic_fanduel_refresh():
             print(f"[FANDUEL REFRESH] Failed: {e}")
 
 
+async def periodic_cheap_no_scan():
+    while True:
+        await asyncio.sleep(10)
+        try:
+            results = await asyncio.to_thread(_scan_cheap_nos)
+            with _cheap_nos_lock:
+                _cheap_nos[:] = results
+            if connected_clients:
+                msg = json.dumps({'type': 'cheap_nos_update', 'data': results})
+                for client in connected_clients[:]:
+                    try:
+                        await client.send_text(msg)
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[CHEAP NO] Scan error: {e}")
+
+
 async def periodic_trade_cleanup():
     while True:
         await asyncio.sleep(1800)  # every 30 minutes
@@ -856,6 +946,7 @@ async def startup_event():
     asyncio.create_task(periodic_ticker_refresh())
     asyncio.create_task(periodic_fanduel_refresh())
     asyncio.create_task(periodic_trade_cleanup())
+    asyncio.create_task(periodic_cheap_no_scan())
 
 
 # ============================================================

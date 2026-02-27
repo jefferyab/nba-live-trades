@@ -394,6 +394,62 @@
         .prop-bar-fill.assists { background: #22c55e; }
         .prop-bar-fill.threes { background: #a855f7; }
 
+        /* Cheap NOs Feed */
+        .cheap-nos-feed {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .cheap-nos-feed::-webkit-scrollbar { width: 6px; }
+        .cheap-nos-feed::-webkit-scrollbar-track { background: transparent; }
+        .cheap-nos-feed::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 3px; }
+
+        .cheap-no-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 8px 10px;
+            background: #18181b;
+            border: 1px solid #27272a;
+            border-left: 3px solid #ef4444;
+            border-radius: 6px;
+            margin-bottom: 6px;
+        }
+        .cheap-no-left {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex: 1;
+            min-width: 0;
+        }
+        .cheap-no-player {
+            font-weight: 600;
+            font-size: 13px;
+            color: #fff;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .cheap-no-line {
+            font-size: 11px;
+            color: #a1a1aa;
+        }
+        .cheap-no-right {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-shrink: 0;
+        }
+        .cheap-no-price {
+            font-size: 16px;
+            font-weight: 700;
+            color: #ef4444;
+        }
+        .cheap-no-qty {
+            font-size: 11px;
+            color: #71717a;
+        }
+
         @media (max-width: 900px) {
             .main { flex-direction: column; height: auto; }
             .feed-panel { border-right: none; border-bottom: 1px solid #27272a; max-height: 60vh; }
@@ -465,6 +521,14 @@
         </div>
 
         <div class="stats-panel">
+            <!-- Cheap NO Contracts -->
+            <div class="stats-section">
+                <div class="stats-section-title">Cheap NO Contracts (&le;10&cent;)</div>
+                <div class="cheap-nos-feed" id="cheapNosFeed">
+                    <div style="color: #52525b; font-size: 13px;">Scanning orderbooks...</div>
+                </div>
+            </div>
+
             <!-- Time Range Filter -->
             <div style="margin-bottom: 16px;">
                 <div class="filter-group" style="justify-content: space-between;">
@@ -537,6 +601,7 @@
                 propType: 'all',
                 games: new Set(), // empty = all games
             },
+            cheapNos: [],
             statsWindow: 21600, // 6h default
             loadingMore: false,
             allLoaded: false,
@@ -811,6 +876,32 @@
             }
         }
 
+        function renderCheapNos() {
+            const container = document.getElementById('cheapNosFeed');
+            const items = state.cheapNos;
+            if (!items || items.length === 0) {
+                container.innerHTML = '<div style="color: #52525b; font-size: 13px;">No cheap NO contracts found</div>';
+                return;
+            }
+            container.innerHTML = items.map(item => {
+                const propClass = item.prop_type.toLowerCase();
+                return `
+                <div class="cheap-no-item">
+                    <div class="cheap-no-left">
+                        <span class="trade-side-badge no">NO</span>
+                        <div>
+                            <div class="cheap-no-player">${item.player} <span class="prop-badge ${propClass}">${item.prop_type}</span></div>
+                            <div class="cheap-no-line">${item.line}</div>
+                        </div>
+                    </div>
+                    <div class="cheap-no-right">
+                        <span class="cheap-no-price">${item.no_price}&cent;</span>
+                        <span class="cheap-no-qty">&times;${item.quantity}</span>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
         function populateGameFilter(games) {
             const group = document.getElementById('filterGame');
             group.innerHTML = '<button class="toggle-btn active" data-value="all">All</button>';
@@ -866,10 +957,12 @@
                     case 'bootstrap':
                         state.trades = msg.trades || [];
                         state.stats = msg.stats || {};
+                        state.cheapNos = msg.cheap_nos || [];
                         if (msg.games) populateGameFilter(msg.games);
                         document.getElementById('headerTickers').textContent = msg.games ? msg.games.length : '--';
                         renderAllTrades();
                         renderStats();
+                        renderCheapNos();
                         break;
 
                     case 'trade':
@@ -892,6 +985,11 @@
                             state.stats = msg.data;
                             renderStats();
                         }
+                        break;
+
+                    case 'cheap_nos_update':
+                        state.cheapNos = msg.data || [];
+                        renderCheapNos();
                         break;
 
                     case 'pong':
