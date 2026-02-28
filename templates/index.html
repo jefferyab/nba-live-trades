@@ -908,6 +908,7 @@
             const container = document.getElementById('cheapNosFeed');
             const unhideBtn = document.getElementById('unhideAllBtn');
             const items = (state.cheapNos || []).filter(item => !state.hiddenTickers.has(item.ticker));
+            console.log('[CHEAP NOS] renderCheapNos called, total:', state.cheapNos.length, 'visible:', items.length, 'hidden:', state.hiddenTickers.size);
             unhideBtn.style.display = state.hiddenTickers.size > 0 ? '' : 'none';
             if (items.length === 0) {
                 container.innerHTML = state.hiddenTickers.size > 0
@@ -991,6 +992,7 @@
                         state.trades = msg.trades || [];
                         state.stats = msg.stats || {};
                         state.cheapNos = msg.cheap_nos || [];
+                        console.log('[BOOTSTRAP] cheap_nos received:', state.cheapNos.length, state.cheapNos);
                         if (msg.games) populateGameFilter(msg.games);
                         document.getElementById('headerTickers').textContent = msg.games ? msg.games.length : '--';
                         renderAllTrades();
