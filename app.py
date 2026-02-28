@@ -743,8 +743,60 @@ async def health():
         "trade_ws_connected": trade_ws.connected,
         "ob_ws_connected": ob_ws.connected,
         "subscribed_tickers": len(trade_ws.subscribed_tickers),
+        "ob_subscribed_tickers": len(ob_ws.subscribed_tickers),
+        "ob_orderbooks_cached": len(ob_ws.orderbooks),
         "total_trades": trade_store._trade_count,
         "connected_clients": len(connected_clients),
+    }
+
+
+@app.get("/api/debug/cheap-nos")
+async def debug_cheap_nos():
+    """Diagnostic endpoint: shows what the cheap NO scanner sees."""
+    # Current cheap_nos state
+    with _cheap_nos_lock:
+        current = list(_cheap_nos.values())
+
+    # Scan all orderbooks right now
+    with ob_ws.lock:
+        ob_count = len(ob_ws.orderbooks)
+        # Sample up to 5 tickers with YES bids >= 90
+        samples = []
+        for ticker, ob in ob_ws.orderbooks.items():
+            yes_bids = ob.get('orderbook', {}).get('yes', [])
+            high_bids = [(p, q) for p, q in yes_bids if p >= 90]
+            if high_bids:
+                meta = ticker_cache.metadata.get(ticker, {})
+                samples.append({
+                    'ticker': ticker,
+                    'player': meta.get('player', '?'),
+                    'high_yes_bids': high_bids,
+                    'no_prices': [(100 - p, q) for p, q in high_bids],
+                    'has_metadata': ticker in ticker_cache.metadata,
+                })
+            if len(samples) >= 10:
+                break
+
+    # Also check raw: any YES bids at all?
+    total_yes_bids = 0
+    tickers_with_yes = 0
+    with ob_ws.lock:
+        for ticker, ob in ob_ws.orderbooks.items():
+            yes_bids = ob.get('orderbook', {}).get('yes', [])
+            if yes_bids:
+                tickers_with_yes += 1
+                total_yes_bids += len(yes_bids)
+
+    return {
+        "ob_ws_connected": ob_ws.connected,
+        "ob_subscribed": len(ob_ws.subscribed_tickers),
+        "ob_cached": ob_count,
+        "ticker_cache_count": len(ticker_cache.tickers),
+        "metadata_count": len(ticker_cache.metadata),
+        "tickers_with_yes_bids": tickers_with_yes,
+        "total_yes_bid_levels": total_yes_bids,
+        "current_cheap_nos": current,
+        "tickers_with_yes_gte_90": samples,
     }
 
 
