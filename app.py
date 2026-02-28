@@ -16,6 +16,7 @@ import base64
 import threading
 import re
 import os
+import queue
 import sqlite3
 import unicodedata
 import requests
@@ -343,6 +344,20 @@ class TradeWebSocket:
         self.ws_thread = None
         self.orderbooks = {}  # ticker -> {'yes': [...], 'no': [...]}
         self.ob_lock = threading.Lock()
+        # Trade processing queue — keeps WS thread free for orderbook deltas
+        self._trade_queue = queue.Queue()
+        self._trade_worker = threading.Thread(target=self._process_trades, daemon=True)
+        self._trade_worker.start()
+
+    def _process_trades(self):
+        """Worker thread: processes trades off the queue so WS thread stays fast."""
+        while True:
+            raw_trade = self._trade_queue.get()
+            try:
+                if self.on_trade_callback:
+                    self.on_trade_callback(raw_trade)
+            except Exception as e:
+                print(f"[TRADE WS] Trade worker error: {e}")
 
     def _generate_auth_headers(self):
         timestamp_str = str(int(datetime.now().timestamp() * 1000))
@@ -370,11 +385,8 @@ class TradeWebSocket:
         data = json.loads(message)
         msg_type = data.get('type')
 
-        if msg_type == 'trade' and self.on_trade_callback:
-            try:
-                self.on_trade_callback(data['msg'])
-            except Exception as e:
-                print(f"[TRADE WS] Callback error: {e}")
+        if msg_type == 'trade':
+            self._trade_queue.put_nowait(data['msg'])  # non-blocking
 
         elif msg_type == 'orderbook_snapshot':
             ticker = data['msg'].get('market_ticker')
