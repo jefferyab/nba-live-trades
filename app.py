@@ -903,6 +903,7 @@ async def debug_reconcile():
             "count": len(_cheap_nos),
             "ticker_count": len(tickers),
             "test_fetch": test_result,
+            "reconcile_stats": _reconcile_stats,
             "items": list(_cheap_nos.values()),
         }
 
@@ -999,14 +1000,17 @@ def on_orderbook_delta(ticker, ob_data):
         )
 
 
+_reconcile_stats = {}  # last reconcile stats for debugging
+
+
 def _full_cheap_nos_reconcile():
     """Fetch ALL orderbooks via REST API and rebuild cheap_nos from fresh data."""
+    global _reconcile_stats
     tickers = list(ticker_cache.tickers)
     if not tickers:
-        print("[CHEAP NO RECONCILE] No tickers in cache, skipping")
+        _reconcile_stats = {"error": "no tickers"}
         return
 
-    print(f"[CHEAP NO RECONCILE] Scanning {len(tickers)} tickers via REST...")
     scan_start = time.time()
 
     session = requests.Session()
@@ -1015,6 +1019,7 @@ def _full_cheap_nos_reconcile():
 
     fetched = 0
     failed = 0
+    errors = []
 
     def fetch_ob(ticker):
         try:
@@ -1023,16 +1028,18 @@ def _full_cheap_nos_reconcile():
                 timeout=5
             )
             if resp.status_code == 200:
-                return ticker, resp.json().get('orderbook', {})
-        except Exception:
-            pass
-        return ticker, None
+                return ticker, resp.json().get('orderbook', {}), None
+            return ticker, None, f"status={resp.status_code}"
+        except Exception as e:
+            return ticker, None, str(e)
 
     new_cheap = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        for ticker, ob in executor.map(fetch_ob, tickers):
+        for ticker, ob, err in executor.map(fetch_ob, tickers):
             if ob is None:
                 failed += 1
+                if len(errors) < 5:
+                    errors.append({"ticker": ticker, "error": err})
                 continue
             fetched += 1
             yes_bids = ob.get('yes', [])
@@ -1049,6 +1056,14 @@ def _full_cheap_nos_reconcile():
                 new_cheap[ticker] = entry
 
     elapsed = time.time() - scan_start
+    _reconcile_stats = {
+        "tickers": len(tickers),
+        "fetched": fetched,
+        "failed": failed,
+        "cheap_found": len(new_cheap),
+        "elapsed": round(elapsed, 1),
+        "errors": errors,
+    }
     print(f"[CHEAP NO RECONCILE] Fetched {fetched}, failed {failed}, found {len(new_cheap)} cheap NOs in {elapsed:.1f}s")
 
     with _cheap_nos_lock:
