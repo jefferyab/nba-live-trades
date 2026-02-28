@@ -872,6 +872,14 @@ async def debug_search(name: str):
     return {"query": name, "count": len(matches), "matches": matches}
 
 
+@app.get("/api/debug/reconcile")
+async def debug_reconcile():
+    """Manually trigger a cheap NOs REST reconciliation and return results."""
+    await asyncio.to_thread(_full_cheap_nos_reconcile)
+    with _cheap_nos_lock:
+        return {"count": len(_cheap_nos), "items": list(_cheap_nos.values())}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -968,11 +976,18 @@ def _full_cheap_nos_reconcile():
     """Fetch ALL orderbooks via REST API and rebuild cheap_nos from fresh data."""
     tickers = list(ticker_cache.tickers)
     if not tickers:
+        print("[CHEAP NO RECONCILE] No tickers in cache, skipping")
         return
+
+    print(f"[CHEAP NO RECONCILE] Scanning {len(tickers)} tickers via REST...")
+    scan_start = time.time()
 
     session = requests.Session()
     adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
     session.mount('https://', adapter)
+
+    fetched = 0
+    failed = 0
 
     def fetch_ob(ticker):
         try:
@@ -990,7 +1005,9 @@ def _full_cheap_nos_reconcile():
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
         for ticker, ob in executor.map(fetch_ob, tickers):
             if ob is None:
+                failed += 1
                 continue
+            fetched += 1
             yes_bids = ob.get('yes', [])
             # Update the WS cache with fresh REST data
             with ob_ws.lock:
@@ -1003,6 +1020,9 @@ def _full_cheap_nos_reconcile():
             entry = _extract_cheap_no(ticker, yes_bids)
             if entry:
                 new_cheap[ticker] = entry
+
+    elapsed = time.time() - scan_start
+    print(f"[CHEAP NO RECONCILE] Fetched {fetched}, failed {failed}, found {len(new_cheap)} cheap NOs in {elapsed:.1f}s")
 
     with _cheap_nos_lock:
         if new_cheap != _cheap_nos:
