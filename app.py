@@ -23,6 +23,7 @@ import requests
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
+from websocket_manager import KalshiWebSocketManager
 
 # ============================================================
 # CONFIGURATION
@@ -329,6 +330,7 @@ def calculate_ev(kalshi_price, fanduel_price):
 # ============================================================
 
 class TradeWebSocket:
+    """Handles trade channel only. Orderbooks use separate KalshiWebSocketManager."""
     def __init__(self, api_key_id, private_key_pem):
         self.api_key_id = api_key_id
         self.private_key = serialization.load_pem_private_key(
@@ -340,24 +342,19 @@ class TradeWebSocket:
         self.connected = False
         self.subscribed_tickers = set()
         self.on_trade_callback = None
-        self.on_orderbook_callback = None
         self.ws_thread = None
-        self.orderbooks = {}  # ticker -> {'yes': [...], 'no': [...]}
-        self.ob_lock = threading.Lock()
-        # Trade processing queue — keeps WS thread free for orderbook deltas
         self._trade_queue = queue.Queue()
         self._trade_worker = threading.Thread(target=self._process_trades, daemon=True)
         self._trade_worker.start()
 
     def _process_trades(self):
-        """Worker thread: processes trades off the queue so WS thread stays fast."""
         while True:
             raw_trade = self._trade_queue.get()
             try:
                 if self.on_trade_callback:
                     self.on_trade_callback(raw_trade)
             except Exception as e:
-                print(f"[TRADE WS] Trade worker error: {e}")
+                print(f"[TRADE WS] Worker error: {e}")
 
     def _generate_auth_headers(self):
         timestamp_str = str(int(datetime.now().timestamp() * 1000))
@@ -383,45 +380,8 @@ class TradeWebSocket:
 
     def _on_message(self, ws, message):
         data = json.loads(message)
-        msg_type = data.get('type')
-
-        if msg_type == 'trade':
-            self._trade_queue.put_nowait(data['msg'])  # non-blocking
-
-        elif msg_type == 'orderbook_snapshot':
-            ticker = data['msg'].get('market_ticker')
-            yes_bids = data['msg'].get('yes', [])
-            no_bids = data['msg'].get('no', [])
-            with self.ob_lock:
-                self.orderbooks[ticker] = {
-                    'yes': yes_bids,
-                    'no': no_bids,
-                }
-                # Snapshot copy under lock for callback
-                yes_copy = list(yes_bids)
-            if self.on_orderbook_callback:
-                try:
-                    self.on_orderbook_callback(ticker, yes_copy)
-                except Exception as e:
-                    print(f"[TRADE WS] OB snapshot callback error: {e}")
-
-        elif msg_type == 'orderbook_delta':
-            ticker = data['msg'].get('market_ticker')
-            yes_copy = None
-            with self.ob_lock:
-                if ticker in self.orderbooks:
-                    delta = data['msg']
-                    if 'yes' in delta:
-                        self.orderbooks[ticker]['yes'] = delta['yes']
-                    if 'no' in delta:
-                        self.orderbooks[ticker]['no'] = delta['no']
-                    # Snapshot copy under lock for callback
-                    yes_copy = list(self.orderbooks[ticker].get('yes', []))
-            if yes_copy is not None and self.on_orderbook_callback:
-                try:
-                    self.on_orderbook_callback(ticker, yes_copy)
-                except Exception as e:
-                    print(f"[TRADE WS] OB delta callback error: {e}")
+        if data.get('type') == 'trade':
+            self._trade_queue.put_nowait(data['msg'])
 
     def _on_error(self, ws, error):
         print(f'[TRADE WS] Error: {error}')
@@ -438,7 +398,7 @@ class TradeWebSocket:
     def _reconnect(self, tickers):
         attempt = 0
         while True:
-            delay = min(2 ** attempt, 60)  # cap at 60s
+            delay = min(2 ** attempt, 60)
             time.sleep(delay)
             attempt += 1
             print(f"[TRADE WS] Reconnect attempt {attempt}...")
@@ -485,18 +445,17 @@ class TradeWebSocket:
         if not tickers:
             return
         ticker_list = list(tickers)
-        # Subscribe to both trade and orderbook_delta channels
         msg = {
             'id': int(time.time()),
             'cmd': 'subscribe',
             'params': {
-                'channels': ['trade', 'orderbook_delta'],
+                'channels': ['trade'],
                 'market_tickers': ticker_list
             }
         }
         self.ws.send(json.dumps(msg))
         self.subscribed_tickers = set(tickers)
-        print(f"[TRADE WS] Subscribed to trade + orderbook_delta for {len(ticker_list)} tickers")
+        print(f"[TRADE WS] Subscribed to trade for {len(ticker_list)} tickers")
 
     def resubscribe(self, tickers):
         if self.subscribed_tickers:
@@ -505,7 +464,7 @@ class TradeWebSocket:
                     'id': int(time.time()),
                     'cmd': 'unsubscribe',
                     'params': {
-                        'channels': ['trade', 'orderbook_delta'],
+                        'channels': ['trade'],
                         'market_tickers': list(self.subscribed_tickers)
                     }
                 }
@@ -749,6 +708,7 @@ class TradeStore:
 ticker_cache = TickerCache()
 trade_store = TradeStore()
 trade_ws = TradeWebSocket(KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY)
+ob_ws = KalshiWebSocketManager(KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY)  # dedicated orderbook WS
 
 app = FastAPI()
 connected_clients = []
@@ -780,7 +740,8 @@ async def get_trades(before_ts: float = None, limit: int = Query(default=100, le
 async def health():
     return {
         "status": "ok",
-        "ws_connected": trade_ws.connected,
+        "trade_ws_connected": trade_ws.connected,
+        "ob_ws_connected": ob_ws.connected,
         "subscribed_tickers": len(trade_ws.subscribed_tickers),
         "total_trades": trade_store._trade_count,
         "connected_clients": len(connected_clients),
@@ -854,9 +815,11 @@ def _get_cheap_nos_list():
     return items
 
 
-def on_orderbook_update(ticker, yes_bids):
-    """Called from TradeWebSocket thread with YES bids snapshot.
-    Processes immediately and pushes to clients — same pattern as nba-props-dashboard."""
+def on_orderbook_delta(ticker, ob_data):
+    """Called from KalshiWebSocketManager on every orderbook_delta.
+    Signature matches set_delta_callback — identical to nba-props-dashboard.
+    ob_data = {'orderbook': {'yes': [...], 'no': [...]}}"""
+    yes_bids = ob_data.get('orderbook', {}).get('yes', [])
     entry = _extract_cheap_no(ticker, yes_bids)
     items = None
 
@@ -866,11 +829,9 @@ def on_orderbook_update(ticker, yes_bids):
             _cheap_nos[ticker] = entry
         else:
             _cheap_nos.pop(ticker, None)
-        # Snapshot the full list if anything changed
         if entry != prev:
             items = list(_cheap_nos.values())
 
-    # Push directly from callback — no polling delay
     if items is not None and _event_loop and connected_clients:
         items.sort(key=lambda x: (x['no_price'], -x['quantity']))
         _event_loop.call_soon_threadsafe(
@@ -881,8 +842,9 @@ def on_orderbook_update(ticker, yes_bids):
 
 def _full_cheap_nos_reconcile():
     """Re-scan ALL in-memory orderbooks in one pass and rebuild cheap_nos."""
-    with trade_ws.ob_lock:
-        all_obs = {t: list(ob.get('yes', [])) for t, ob in trade_ws.orderbooks.items()}
+    with ob_ws.lock:
+        all_obs = {t: list(ob.get('orderbook', {}).get('yes', []))
+                   for t, ob in ob_ws.orderbooks.items()}
 
     new_cheap = {}
     for ticker, yes_bids in all_obs.items():
@@ -959,11 +921,18 @@ async def bootstrap():
             return
         # Fetch FanDuel props for EV% calculation
         await asyncio.to_thread(fetch_fanduel_props)
+
+        # 1. Trade WS — trades only
         trade_ws.on_trade_callback = on_trade
-        trade_ws.on_orderbook_callback = on_orderbook_update
         await asyncio.to_thread(trade_ws.connect)
         await asyncio.to_thread(trade_ws.subscribe, tickers)
-        print(f"[STARTUP] Live trades + orderbook feed active for {len(tickers)} NBA prop tickers")
+        print(f"[STARTUP] Trade feed active for {len(tickers)} tickers")
+
+        # 2. Orderbook WS — dedicated connection, same as nba-props-dashboard
+        ob_ws.set_delta_callback(on_orderbook_delta)
+        await asyncio.to_thread(ob_ws.connect)
+        await asyncio.to_thread(ob_ws.subscribe_to_orderbooks, tickers)
+        print(f"[STARTUP] Orderbook feed active for {len(tickers)} tickers")
     except Exception as e:
         print(f"[STARTUP] Bootstrap failed: {e}")
 
@@ -975,18 +944,25 @@ async def periodic_ticker_refresh():
             new_tickers = await asyncio.to_thread(discover_tickers)
             if not new_tickers:
                 continue
-            # If WS is disconnected, reconnect before subscribing
+            new_set = set(new_tickers)
+
+            # Refresh trade WS
             if not trade_ws.connected:
-                print("[REFRESH] WS disconnected, reconnecting...")
                 connected = await asyncio.to_thread(trade_ws.connect)
                 if connected:
                     await asyncio.to_thread(trade_ws.subscribe, new_tickers)
-                    print(f"[REFRESH] Reconnected and subscribed to {len(new_tickers)} tickers")
-                else:
-                    print("[REFRESH] Reconnect failed, will retry next cycle")
-            elif set(new_tickers) != trade_ws.subscribed_tickers:
+            elif new_set != trade_ws.subscribed_tickers:
                 await asyncio.to_thread(trade_ws.resubscribe, new_tickers)
-                print(f"[REFRESH] Updated subscription to {len(new_tickers)} tickers")
+
+            # Refresh orderbook WS
+            if not ob_ws.connected:
+                connected = await asyncio.to_thread(ob_ws.connect)
+                if connected:
+                    await asyncio.to_thread(ob_ws.subscribe_to_orderbooks, new_tickers)
+            else:
+                await asyncio.to_thread(ob_ws.ensure_subscribed, new_tickers)
+
+            print(f"[REFRESH] Updated subscriptions to {len(new_tickers)} tickers")
         except Exception as e:
             print(f"[REFRESH] Failed: {e}")
 
