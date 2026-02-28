@@ -1114,6 +1114,45 @@ def _reconcile_batch():
         )
 
 
+def _fast_cheap_nos_scan():
+    """Quick REST scan of ONLY tickers currently in _cheap_nos for instant quantity tracking."""
+    with _cheap_nos_lock:
+        tracked_tickers = list(_cheap_nos.keys())
+    if not tracked_tickers:
+        return
+
+    changed = False
+    for ticker in tracked_tickers:
+        ticker, ob, err = _fetch_ob_rest(ticker)
+        if ob is None:
+            continue
+        yes_bids = ob.get('yes', [])
+        # Update WS cache
+        with ob_ws.lock:
+            ob_ws.orderbooks[ticker] = {
+                'orderbook': {'yes': yes_bids, 'no': ob.get('no', [])}
+            }
+        entry = _extract_cheap_no(ticker, yes_bids)
+        with _cheap_nos_lock:
+            prev = _cheap_nos.get(ticker)
+            if entry:
+                _cheap_nos[ticker] = entry
+            else:
+                _cheap_nos.pop(ticker, None)
+            if entry != prev:
+                changed = True
+        time.sleep(0.05)
+
+    if changed and _event_loop and connected_clients:
+        with _cheap_nos_lock:
+            items = list(_cheap_nos.values())
+        items.sort(key=lambda x: (x['no_price'], -x['quantity']))
+        _event_loop.call_soon_threadsafe(
+            asyncio.ensure_future,
+            _broadcast_cheap_nos(items)
+        )
+
+
 async def _broadcast_cheap_nos(items):
     msg = json.dumps({'type': 'cheap_nos_update', 'data': items})
     for client in connected_clients[:]:
@@ -1222,10 +1261,20 @@ async def periodic_fanduel_refresh():
             print(f"[FANDUEL REFRESH] Failed: {e}")
 
 
-async def periodic_cheap_nos_reconcile():
-    """Batched REST API reconciliation every 5 seconds as safety net."""
+async def periodic_cheap_nos_fast():
+    """Fast REST scan of existing cheap NOs every 2 seconds for live quantity tracking."""
     while True:
-        await asyncio.sleep(5)
+        await asyncio.sleep(2)
+        try:
+            await asyncio.to_thread(_fast_cheap_nos_scan)
+        except Exception as e:
+            print(f"[CHEAP NO FAST] Failed: {e}")
+
+
+async def periodic_cheap_nos_reconcile():
+    """Batched REST API reconciliation every 10 seconds to discover new cheap NOs."""
+    while True:
+        await asyncio.sleep(10)
         try:
             await asyncio.to_thread(_reconcile_batch)
         except Exception as e:
@@ -1249,6 +1298,7 @@ async def startup_event():
     asyncio.create_task(bootstrap())
     asyncio.create_task(periodic_ticker_refresh())
     asyncio.create_task(periodic_fanduel_refresh())
+    asyncio.create_task(periodic_cheap_nos_fast())
     asyncio.create_task(periodic_cheap_nos_reconcile())
     asyncio.create_task(periodic_trade_cleanup())
 
