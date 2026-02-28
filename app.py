@@ -894,7 +894,7 @@ async def debug_reconcile():
             test_result = {"ticker": test_ticker, "error": str(e)}
 
     try:
-        await asyncio.to_thread(_full_cheap_nos_reconcile)
+        await asyncio.to_thread(_reconcile_batch)
     except Exception as e:
         return {"error": str(e), "ticker_count": len(tickers), "test_fetch": test_result}
 
@@ -1001,80 +1001,90 @@ def on_orderbook_delta(ticker, ob_data):
 
 
 _reconcile_stats = {}  # last reconcile stats for debugging
+_reconcile_batch_idx = 0  # current batch index for rotating scans
+_RECONCILE_BATCH_SIZE = 50  # tickers per scan cycle
+_rest_session = requests.Session()
+_rest_session.mount('https://', requests.adapters.HTTPAdapter(pool_connections=5, pool_maxsize=5))
 
 
-def _full_cheap_nos_reconcile():
-    """Fetch ALL orderbooks via REST API and rebuild cheap_nos from fresh data."""
-    global _reconcile_stats
+def _fetch_ob_rest(ticker):
+    """Fetch a single orderbook from REST API."""
+    try:
+        resp = _rest_session.get(
+            f"https://api.elections.kalshi.com/trade-api/v2/markets/{ticker}/orderbook",
+            timeout=5
+        )
+        if resp.status_code == 200:
+            return ticker, resp.json().get('orderbook', {}), None
+        return ticker, None, f"status={resp.status_code}"
+    except Exception as e:
+        return ticker, None, str(e)
+
+
+def _reconcile_batch():
+    """Fetch a batch of orderbooks via REST and update cheap_nos incrementally."""
+    global _reconcile_batch_idx, _reconcile_stats
     tickers = list(ticker_cache.tickers)
     if not tickers:
         _reconcile_stats = {"error": "no tickers"}
         return
 
+    # Rotate through tickers in batches
+    start = _reconcile_batch_idx
+    batch = tickers[start:start + _RECONCILE_BATCH_SIZE]
+    _reconcile_batch_idx = start + _RECONCILE_BATCH_SIZE
+    if _reconcile_batch_idx >= len(tickers):
+        _reconcile_batch_idx = 0
+
     scan_start = time.time()
-
-    session = requests.Session()
-    adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
-    session.mount('https://', adapter)
-
     fetched = 0
     failed = 0
-    errors = []
+    changed = False
 
-    def fetch_ob(ticker):
-        try:
-            resp = session.get(
-                f"https://api.elections.kalshi.com/trade-api/v2/markets/{ticker}/orderbook",
-                timeout=5
-            )
-            if resp.status_code == 200:
-                return ticker, resp.json().get('orderbook', {}), None
-            return ticker, None, f"status={resp.status_code}"
-        except Exception as e:
-            return ticker, None, str(e)
+    # Sequential fetches with small delay to avoid 429
+    for ticker in batch:
+        ticker, ob, err = _fetch_ob_rest(ticker)
+        if ob is None:
+            failed += 1
+            continue
+        fetched += 1
 
-    new_cheap = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        for ticker, ob, err in executor.map(fetch_ob, tickers):
-            if ob is None:
-                failed += 1
-                if len(errors) < 5:
-                    errors.append({"ticker": ticker, "error": err})
-                continue
-            fetched += 1
-            yes_bids = ob.get('yes', [])
-            # Update the WS cache with fresh REST data
-            with ob_ws.lock:
-                ob_ws.orderbooks[ticker] = {
-                    'orderbook': {
-                        'yes': yes_bids,
-                        'no': ob.get('no', [])
-                    }
+        yes_bids = ob.get('yes', [])
+        # Update WS cache with fresh data
+        with ob_ws.lock:
+            ob_ws.orderbooks[ticker] = {
+                'orderbook': {
+                    'yes': yes_bids,
+                    'no': ob.get('no', [])
                 }
-            entry = _extract_cheap_no(ticker, yes_bids)
+            }
+
+        entry = _extract_cheap_no(ticker, yes_bids)
+        with _cheap_nos_lock:
+            prev = _cheap_nos.get(ticker)
             if entry:
-                new_cheap[ticker] = entry
+                _cheap_nos[ticker] = entry
+            else:
+                _cheap_nos.pop(ticker, None)
+            if entry != prev:
+                changed = True
+
+        time.sleep(0.05)  # 50ms delay between requests
 
     elapsed = time.time() - scan_start
     _reconcile_stats = {
-        "tickers": len(tickers),
+        "batch_start": start,
+        "batch_size": len(batch),
+        "total_tickers": len(tickers),
         "fetched": fetched,
         "failed": failed,
-        "cheap_found": len(new_cheap),
+        "total_cheap_nos": len(_cheap_nos),
         "elapsed": round(elapsed, 1),
-        "errors": errors,
     }
-    print(f"[CHEAP NO RECONCILE] Fetched {fetched}, failed {failed}, found {len(new_cheap)} cheap NOs in {elapsed:.1f}s")
 
-    with _cheap_nos_lock:
-        if new_cheap != _cheap_nos:
-            _cheap_nos.clear()
-            _cheap_nos.update(new_cheap)
+    if changed and _event_loop and connected_clients:
+        with _cheap_nos_lock:
             items = list(_cheap_nos.values())
-        else:
-            return  # nothing changed
-
-    if _event_loop and connected_clients:
         items.sort(key=lambda x: (x['no_price'], -x['quantity']))
         _event_loop.call_soon_threadsafe(
             asyncio.ensure_future,
@@ -1191,11 +1201,11 @@ async def periodic_fanduel_refresh():
 
 
 async def periodic_cheap_nos_reconcile():
-    """Full REST API reconciliation every 10 seconds as safety net."""
+    """Batched REST API reconciliation every 5 seconds as safety net."""
     while True:
-        await asyncio.sleep(10)
+        await asyncio.sleep(5)
         try:
-            await asyncio.to_thread(_full_cheap_nos_reconcile)
+            await asyncio.to_thread(_reconcile_batch)
         except Exception as e:
             print(f"[CHEAP NO RECONCILE] Failed: {e}")
 
