@@ -799,6 +799,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 _cheap_nos = {}  # ticker -> {ticker, player, prop_type, line, game_slug, no_price, quantity}
 _cheap_nos_lock = threading.Lock()
+_cheap_nos_dirty = False
 
 
 def _extract_cheap_no(ticker, yes_bids):
@@ -835,42 +836,26 @@ def _get_cheap_nos_list():
     return items
 
 
-def _broadcast_if_changed(changed):
-    """Push cheap_nos list to all connected clients if changed."""
-    if changed and _event_loop and connected_clients:
-        items = _get_cheap_nos_list()
-        _event_loop.call_soon_threadsafe(
-            asyncio.ensure_future,
-            _broadcast_cheap_nos(items)
-        )
-
-
 def on_orderbook_update(ticker):
-    """Called from TradeWebSocket thread on every orderbook snapshot/delta."""
-    # Snapshot YES bids under lock so we read exactly what was just written
+    """Called from TradeWebSocket thread on every orderbook snapshot/delta.
+    Updates _cheap_nos immediately and marks dirty for fast broadcast."""
+    global _cheap_nos_dirty
     with trade_ws.ob_lock:
         ob = trade_ws.orderbooks.get(ticker)
         yes_bids = list(ob['yes']) if ob and 'yes' in ob else []
 
     entry = _extract_cheap_no(ticker, yes_bids)
-    changed = False
     with _cheap_nos_lock:
         if entry:
-            prev = _cheap_nos.get(ticker)
-            if prev != entry:
-                _cheap_nos[ticker] = entry
-                changed = True
+            _cheap_nos[ticker] = entry
         else:
-            if ticker in _cheap_nos:
-                del _cheap_nos[ticker]
-                changed = True
-
-    _broadcast_if_changed(changed)
+            _cheap_nos.pop(ticker, None)
+    _cheap_nos_dirty = True
 
 
 def _full_cheap_nos_reconcile():
     """Re-scan ALL in-memory orderbooks in one pass and rebuild cheap_nos."""
-    # Single lock acquisition — snapshot all orderbooks at once
+    global _cheap_nos_dirty
     with trade_ws.ob_lock:
         all_obs = {t: list(ob.get('yes', [])) for t, ob in trade_ws.orderbooks.items()}
 
@@ -880,14 +865,11 @@ def _full_cheap_nos_reconcile():
         if entry:
             new_cheap[ticker] = entry
 
-    changed = False
     with _cheap_nos_lock:
         if new_cheap != _cheap_nos:
             _cheap_nos.clear()
             _cheap_nos.update(new_cheap)
-            changed = True
-
-    _broadcast_if_changed(changed)
+            _cheap_nos_dirty = True
 
 
 async def _broadcast_cheap_nos(items):
@@ -984,10 +966,22 @@ async def periodic_fanduel_refresh():
             print(f"[FANDUEL REFRESH] Failed: {e}")
 
 
-async def periodic_cheap_nos_reconcile():
-    """Re-scan all orderbooks every 2 seconds to keep cheap NOs feed fresh."""
+async def cheap_nos_broadcast_loop():
+    """Fast loop: broadcast cheap NOs to clients whenever dirty flag is set.
+    Runs every 200ms so updates feel instant."""
+    global _cheap_nos_dirty
     while True:
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.2)
+        if _cheap_nos_dirty and connected_clients:
+            _cheap_nos_dirty = False
+            items = _get_cheap_nos_list()
+            await _broadcast_cheap_nos(items)
+
+
+async def periodic_cheap_nos_reconcile():
+    """Full reconciliation every 5 seconds as safety net."""
+    while True:
+        await asyncio.sleep(5)
         try:
             await asyncio.to_thread(_full_cheap_nos_reconcile)
         except Exception as e:
@@ -1011,6 +1005,7 @@ async def startup_event():
     asyncio.create_task(bootstrap())
     asyncio.create_task(periodic_ticker_refresh())
     asyncio.create_task(periodic_fanduel_refresh())
+    asyncio.create_task(cheap_nos_broadcast_loop())
     asyncio.create_task(periodic_cheap_nos_reconcile())
     asyncio.create_task(periodic_trade_cleanup())
 
