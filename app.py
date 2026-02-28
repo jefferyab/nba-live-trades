@@ -866,6 +866,32 @@ def on_orderbook_update(ticker):
         )
 
 
+def _full_cheap_nos_reconcile():
+    """Re-scan ALL in-memory orderbooks and rebuild cheap_nos from scratch."""
+    new_cheap = {}
+    with trade_ws.ob_lock:
+        tickers = list(trade_ws.orderbooks.keys())
+
+    for ticker in tickers:
+        entry = _check_cheap_no(ticker)
+        if entry:
+            new_cheap[ticker] = entry
+
+    changed = False
+    with _cheap_nos_lock:
+        if new_cheap != _cheap_nos:
+            _cheap_nos.clear()
+            _cheap_nos.update(new_cheap)
+            changed = True
+
+    if changed and _event_loop and connected_clients:
+        items = _get_cheap_nos_list()
+        _event_loop.call_soon_threadsafe(
+            asyncio.ensure_future,
+            _broadcast_cheap_nos(items)
+        )
+
+
 async def _broadcast_cheap_nos(items):
     msg = json.dumps({'type': 'cheap_nos_update', 'data': items})
     for client in connected_clients[:]:
@@ -960,6 +986,16 @@ async def periodic_fanduel_refresh():
             print(f"[FANDUEL REFRESH] Failed: {e}")
 
 
+async def periodic_cheap_nos_reconcile():
+    """Re-scan all orderbooks every 5 seconds to keep cheap NOs feed fresh."""
+    while True:
+        await asyncio.sleep(5)
+        try:
+            await asyncio.to_thread(_full_cheap_nos_reconcile)
+        except Exception as e:
+            print(f"[CHEAP NO RECONCILE] Failed: {e}")
+
+
 async def periodic_trade_cleanup():
     while True:
         await asyncio.sleep(1800)  # every 30 minutes
@@ -977,6 +1013,7 @@ async def startup_event():
     asyncio.create_task(bootstrap())
     asyncio.create_task(periodic_ticker_refresh())
     asyncio.create_task(periodic_fanduel_refresh())
+    asyncio.create_task(periodic_cheap_nos_reconcile())
     asyncio.create_task(periodic_trade_cleanup())
 
 
