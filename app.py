@@ -378,19 +378,24 @@ class TradeWebSocket:
 
         elif msg_type == 'orderbook_snapshot':
             ticker = data['msg'].get('market_ticker')
+            yes_bids = data['msg'].get('yes', [])
+            no_bids = data['msg'].get('no', [])
             with self.ob_lock:
                 self.orderbooks[ticker] = {
-                    'yes': data['msg'].get('yes', []),
-                    'no': data['msg'].get('no', []),
+                    'yes': yes_bids,
+                    'no': no_bids,
                 }
+                # Snapshot copy under lock for callback
+                yes_copy = list(yes_bids)
             if self.on_orderbook_callback:
                 try:
-                    self.on_orderbook_callback(ticker)
+                    self.on_orderbook_callback(ticker, yes_copy)
                 except Exception as e:
                     print(f"[TRADE WS] OB snapshot callback error: {e}")
 
         elif msg_type == 'orderbook_delta':
             ticker = data['msg'].get('market_ticker')
+            yes_copy = None
             with self.ob_lock:
                 if ticker in self.orderbooks:
                     delta = data['msg']
@@ -398,9 +403,11 @@ class TradeWebSocket:
                         self.orderbooks[ticker]['yes'] = delta['yes']
                     if 'no' in delta:
                         self.orderbooks[ticker]['no'] = delta['no']
-            if self.on_orderbook_callback:
+                    # Snapshot copy under lock for callback
+                    yes_copy = list(self.orderbooks[ticker].get('yes', []))
+            if yes_copy is not None and self.on_orderbook_callback:
                 try:
-                    self.on_orderbook_callback(ticker)
+                    self.on_orderbook_callback(ticker, yes_copy)
                 except Exception as e:
                     print(f"[TRADE WS] OB delta callback error: {e}")
 
@@ -799,7 +806,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
 _cheap_nos = {}  # ticker -> {ticker, player, prop_type, line, game_slug, no_price, quantity}
 _cheap_nos_lock = threading.Lock()
-_cheap_nos_dirty = False
 
 
 def _extract_cheap_no(ticker, yes_bids):
@@ -836,26 +842,33 @@ def _get_cheap_nos_list():
     return items
 
 
-def on_orderbook_update(ticker):
-    """Called from TradeWebSocket thread on every orderbook snapshot/delta.
-    Updates _cheap_nos immediately and marks dirty for fast broadcast."""
-    global _cheap_nos_dirty
-    with trade_ws.ob_lock:
-        ob = trade_ws.orderbooks.get(ticker)
-        yes_bids = list(ob['yes']) if ob and 'yes' in ob else []
-
+def on_orderbook_update(ticker, yes_bids):
+    """Called from TradeWebSocket thread with YES bids snapshot.
+    Processes immediately and pushes to clients — same pattern as nba-props-dashboard."""
     entry = _extract_cheap_no(ticker, yes_bids)
+    items = None
+
     with _cheap_nos_lock:
+        prev = _cheap_nos.get(ticker)
         if entry:
             _cheap_nos[ticker] = entry
         else:
             _cheap_nos.pop(ticker, None)
-    _cheap_nos_dirty = True
+        # Snapshot the full list if anything changed
+        if entry != prev:
+            items = list(_cheap_nos.values())
+
+    # Push directly from callback — no polling delay
+    if items is not None and _event_loop and connected_clients:
+        items.sort(key=lambda x: (x['no_price'], -x['quantity']))
+        _event_loop.call_soon_threadsafe(
+            asyncio.ensure_future,
+            _broadcast_cheap_nos(items)
+        )
 
 
 def _full_cheap_nos_reconcile():
     """Re-scan ALL in-memory orderbooks in one pass and rebuild cheap_nos."""
-    global _cheap_nos_dirty
     with trade_ws.ob_lock:
         all_obs = {t: list(ob.get('yes', [])) for t, ob in trade_ws.orderbooks.items()}
 
@@ -869,7 +882,16 @@ def _full_cheap_nos_reconcile():
         if new_cheap != _cheap_nos:
             _cheap_nos.clear()
             _cheap_nos.update(new_cheap)
-            _cheap_nos_dirty = True
+            items = list(_cheap_nos.values())
+        else:
+            return  # nothing changed
+
+    if _event_loop and connected_clients:
+        items.sort(key=lambda x: (x['no_price'], -x['quantity']))
+        _event_loop.call_soon_threadsafe(
+            asyncio.ensure_future,
+            _broadcast_cheap_nos(items)
+        )
 
 
 async def _broadcast_cheap_nos(items):
@@ -966,18 +988,6 @@ async def periodic_fanduel_refresh():
             print(f"[FANDUEL REFRESH] Failed: {e}")
 
 
-async def cheap_nos_broadcast_loop():
-    """Fast loop: broadcast cheap NOs to clients whenever dirty flag is set.
-    Runs every 200ms so updates feel instant."""
-    global _cheap_nos_dirty
-    while True:
-        await asyncio.sleep(0.2)
-        if _cheap_nos_dirty and connected_clients:
-            _cheap_nos_dirty = False
-            items = _get_cheap_nos_list()
-            await _broadcast_cheap_nos(items)
-
-
 async def periodic_cheap_nos_reconcile():
     """Full reconciliation every 5 seconds as safety net."""
     while True:
@@ -1005,7 +1015,6 @@ async def startup_event():
     asyncio.create_task(bootstrap())
     asyncio.create_task(periodic_ticker_refresh())
     asyncio.create_task(periodic_fanduel_refresh())
-    asyncio.create_task(cheap_nos_broadcast_loop())
     asyncio.create_task(periodic_cheap_nos_reconcile())
     asyncio.create_task(periodic_trade_cleanup())
 
