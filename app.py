@@ -757,13 +757,17 @@ async def debug_cheap_nos():
     with _cheap_nos_lock:
         current = list(_cheap_nos.values())
 
-    # Scan all orderbooks right now
+    # Scan all orderbooks right now — find ALL with YES bids >= 90
+    samples = []
+    total_yes_bids = 0
+    tickers_with_yes = 0
     with ob_ws.lock:
         ob_count = len(ob_ws.orderbooks)
-        # Sample up to 5 tickers with YES bids >= 90
-        samples = []
         for ticker, ob in ob_ws.orderbooks.items():
             yes_bids = ob.get('orderbook', {}).get('yes', [])
+            if yes_bids:
+                tickers_with_yes += 1
+                total_yes_bids += len(yes_bids)
             high_bids = [(p, q) for p, q in yes_bids if p >= 90]
             if high_bids:
                 meta = ticker_cache.metadata.get(ticker, {})
@@ -774,18 +778,6 @@ async def debug_cheap_nos():
                     'no_prices': [(100 - p, q) for p, q in high_bids],
                     'has_metadata': ticker in ticker_cache.metadata,
                 })
-            if len(samples) >= 10:
-                break
-
-    # Also check raw: any YES bids at all?
-    total_yes_bids = 0
-    tickers_with_yes = 0
-    with ob_ws.lock:
-        for ticker, ob in ob_ws.orderbooks.items():
-            yes_bids = ob.get('orderbook', {}).get('yes', [])
-            if yes_bids:
-                tickers_with_yes += 1
-                total_yes_bids += len(yes_bids)
 
     return {
         "ob_ws_connected": ob_ws.connected,
@@ -796,8 +788,88 @@ async def debug_cheap_nos():
         "tickers_with_yes_bids": tickers_with_yes,
         "total_yes_bid_levels": total_yes_bids,
         "current_cheap_nos": current,
-        "tickers_with_yes_gte_90": samples,
+        "all_tickers_with_yes_gte_90": samples,
     }
+
+
+@app.get("/api/debug/ticker/{ticker}")
+async def debug_ticker(ticker: str):
+    """Compare WS-cached orderbook vs REST API for a specific ticker."""
+    # WS cached data
+    with ob_ws.lock:
+        ws_ob = ob_ws.orderbooks.get(ticker)
+        ws_data = None
+        if ws_ob:
+            ws_data = {
+                'yes': list(ws_ob.get('orderbook', {}).get('yes', [])),
+                'no': list(ws_ob.get('orderbook', {}).get('no', [])),
+            }
+
+    # REST API data
+    rest_data = None
+    try:
+        resp = requests.get(
+            f"https://api.elections.kalshi.com/trade-api/v2/markets/{ticker}/orderbook",
+            timeout=5
+        )
+        if resp.status_code == 200:
+            rest_ob = resp.json().get('orderbook', {})
+            rest_data = {
+                'yes': rest_ob.get('yes', []),
+                'no': rest_ob.get('no', []),
+            }
+    except Exception as e:
+        rest_data = {'error': str(e)}
+
+    # Check metadata
+    meta = ticker_cache.metadata.get(ticker)
+    in_ticker_list = ticker in ticker_cache.tickers
+    in_subscribed = ticker in ob_ws.subscribed_tickers
+
+    # Extract cheap NO from WS data
+    cheap_no_result = None
+    if ws_data and ws_data['yes']:
+        cheap_no_result = _extract_cheap_no(ticker, ws_data['yes'])
+
+    # Extract cheap NO from REST data
+    cheap_no_rest = None
+    if rest_data and isinstance(rest_data, dict) and 'yes' in rest_data:
+        cheap_no_rest = _extract_cheap_no(ticker, rest_data['yes'])
+
+    return {
+        "ticker": ticker,
+        "in_ticker_cache": in_ticker_list,
+        "in_subscribed": in_subscribed,
+        "has_metadata": meta is not None,
+        "metadata": meta,
+        "ws_orderbook": ws_data,
+        "rest_orderbook": rest_data,
+        "cheap_no_from_ws": cheap_no_result,
+        "cheap_no_from_rest": cheap_no_rest,
+    }
+
+
+@app.get("/api/debug/search/{name}")
+async def debug_search(name: str):
+    """Search ticker cache for a player name (case-insensitive partial match)."""
+    name_lower = name.lower()
+    matches = []
+    for ticker, meta in ticker_cache.metadata.items():
+        if name_lower in meta.get('player', '').lower():
+            # Also check WS orderbook
+            with ob_ws.lock:
+                ws_ob = ob_ws.orderbooks.get(ticker)
+                ws_yes = list(ws_ob.get('orderbook', {}).get('yes', [])) if ws_ob else None
+            matches.append({
+                'ticker': ticker,
+                'player': meta.get('player'),
+                'prop_type': meta.get('prop_type'),
+                'line': meta.get('line'),
+                'game_slug': meta.get('game_slug'),
+                'ws_yes_bids': ws_yes,
+                'in_subscribed': ticker in ob_ws.subscribed_tickers,
+            })
+    return {"query": name, "count": len(matches), "matches": matches}
 
 
 @app.websocket("/ws")
