@@ -965,16 +965,44 @@ def on_orderbook_delta(ticker, ob_data):
 
 
 def _full_cheap_nos_reconcile():
-    """Re-scan ALL in-memory orderbooks in one pass and rebuild cheap_nos."""
-    with ob_ws.lock:
-        all_obs = {t: list(ob.get('orderbook', {}).get('yes', []))
-                   for t, ob in ob_ws.orderbooks.items()}
+    """Fetch ALL orderbooks via REST API and rebuild cheap_nos from fresh data."""
+    tickers = list(ticker_cache.tickers)
+    if not tickers:
+        return
+
+    session = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
+    session.mount('https://', adapter)
+
+    def fetch_ob(ticker):
+        try:
+            resp = session.get(
+                f"https://api.elections.kalshi.com/trade-api/v2/markets/{ticker}/orderbook",
+                timeout=5
+            )
+            if resp.status_code == 200:
+                return ticker, resp.json().get('orderbook', {})
+        except Exception:
+            pass
+        return ticker, None
 
     new_cheap = {}
-    for ticker, yes_bids in all_obs.items():
-        entry = _extract_cheap_no(ticker, yes_bids)
-        if entry:
-            new_cheap[ticker] = entry
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        for ticker, ob in executor.map(fetch_ob, tickers):
+            if ob is None:
+                continue
+            yes_bids = ob.get('yes', [])
+            # Update the WS cache with fresh REST data
+            with ob_ws.lock:
+                ob_ws.orderbooks[ticker] = {
+                    'orderbook': {
+                        'yes': yes_bids,
+                        'no': ob.get('no', [])
+                    }
+                }
+            entry = _extract_cheap_no(ticker, yes_bids)
+            if entry:
+                new_cheap[ticker] = entry
 
     with _cheap_nos_lock:
         if new_cheap != _cheap_nos:
@@ -1101,9 +1129,9 @@ async def periodic_fanduel_refresh():
 
 
 async def periodic_cheap_nos_reconcile():
-    """Full reconciliation every 5 seconds as safety net."""
+    """Full REST API reconciliation every 10 seconds as safety net."""
     while True:
-        await asyncio.sleep(5)
+        await asyncio.sleep(10)
         try:
             await asyncio.to_thread(_full_cheap_nos_reconcile)
         except Exception as e:
