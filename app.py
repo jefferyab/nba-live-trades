@@ -872,6 +872,21 @@ async def debug_search(name: str):
     return {"query": name, "count": len(matches), "matches": matches}
 
 
+@app.get("/api/debug/deltas")
+async def debug_deltas():
+    """Show WS delta callback statistics."""
+    ago = time.time() - _delta_stats["last_time"] if _delta_stats["last_time"] else None
+    return {
+        "delta_count": _delta_stats["count"],
+        "last_delta_ago_secs": round(ago, 1) if ago else None,
+        "last_ticker": _delta_stats["last_ticker"],
+        "cheap_updates": _delta_stats["cheap_updates"],
+        "broadcasts": _delta_stats["broadcasts"],
+        "ob_ws_connected": ob_ws.connected,
+        "ob_subscribed": len(ob_ws.subscribed_tickers),
+    }
+
+
 @app.get("/api/debug/reconcile")
 async def debug_reconcile():
     """Manually trigger a cheap NOs REST reconciliation and return results."""
@@ -939,6 +954,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 _cheap_nos = {}  # ticker -> {ticker, player, prop_type, line, game_slug, no_price, quantity}
 _cheap_nos_lock = threading.Lock()
+_delta_stats = {"count": 0, "last_time": 0, "last_ticker": "", "broadcasts": 0, "cheap_updates": 0}
 
 
 def _extract_cheap_no(ticker, yes_bids):
@@ -979,6 +995,10 @@ def on_orderbook_delta(ticker, ob_data):
     """Called from KalshiWebSocketManager on every orderbook_delta.
     Signature matches set_delta_callback — identical to nba-props-dashboard.
     ob_data = {'orderbook': {'yes': [...], 'no': [...]}}"""
+    _delta_stats["count"] += 1
+    _delta_stats["last_time"] = time.time()
+    _delta_stats["last_ticker"] = ticker
+
     yes_bids = ob_data.get('orderbook', {}).get('yes', [])
     entry = _extract_cheap_no(ticker, yes_bids)
     items = None
@@ -990,9 +1010,11 @@ def on_orderbook_delta(ticker, ob_data):
         else:
             _cheap_nos.pop(ticker, None)
         if entry != prev:
+            _delta_stats["cheap_updates"] += 1
             items = list(_cheap_nos.values())
 
     if items is not None and _event_loop and connected_clients:
+        _delta_stats["broadcasts"] += 1
         items.sort(key=lambda x: (x['no_price'], -x['quantity']))
         _event_loop.call_soon_threadsafe(
             asyncio.ensure_future,
