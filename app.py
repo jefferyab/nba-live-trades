@@ -801,16 +801,8 @@ _cheap_nos = {}  # ticker -> {ticker, player, prop_type, line, game_slug, no_pri
 _cheap_nos_lock = threading.Lock()
 
 
-def _check_cheap_no(ticker):
-    """Check a single ticker's orderbook for cheap NO contracts. Returns entry or None."""
-    ob = None
-    with trade_ws.ob_lock:
-        if ticker in trade_ws.orderbooks:
-            ob = trade_ws.orderbooks[ticker]
-    if not ob:
-        return None
-
-    yes_bids = ob.get('yes', [])
+def _extract_cheap_no(ticker, yes_bids):
+    """Given a ticker and its YES bids, return a cheap NO entry or None."""
     total_qty = 0
     best_no_price = None
     for price, qty in yes_bids:
@@ -843,9 +835,24 @@ def _get_cheap_nos_list():
     return items
 
 
+def _broadcast_if_changed(changed):
+    """Push cheap_nos list to all connected clients if changed."""
+    if changed and _event_loop and connected_clients:
+        items = _get_cheap_nos_list()
+        _event_loop.call_soon_threadsafe(
+            asyncio.ensure_future,
+            _broadcast_cheap_nos(items)
+        )
+
+
 def on_orderbook_update(ticker):
     """Called from TradeWebSocket thread on every orderbook snapshot/delta."""
-    entry = _check_cheap_no(ticker)
+    # Snapshot YES bids under lock so we read exactly what was just written
+    with trade_ws.ob_lock:
+        ob = trade_ws.orderbooks.get(ticker)
+        yes_bids = list(ob['yes']) if ob and 'yes' in ob else []
+
+    entry = _extract_cheap_no(ticker, yes_bids)
     changed = False
     with _cheap_nos_lock:
         if entry:
@@ -858,22 +865,18 @@ def on_orderbook_update(ticker):
                 del _cheap_nos[ticker]
                 changed = True
 
-    if changed and _event_loop and connected_clients:
-        items = _get_cheap_nos_list()
-        _event_loop.call_soon_threadsafe(
-            asyncio.ensure_future,
-            _broadcast_cheap_nos(items)
-        )
+    _broadcast_if_changed(changed)
 
 
 def _full_cheap_nos_reconcile():
-    """Re-scan ALL in-memory orderbooks and rebuild cheap_nos from scratch."""
-    new_cheap = {}
+    """Re-scan ALL in-memory orderbooks in one pass and rebuild cheap_nos."""
+    # Single lock acquisition — snapshot all orderbooks at once
     with trade_ws.ob_lock:
-        tickers = list(trade_ws.orderbooks.keys())
+        all_obs = {t: list(ob.get('yes', [])) for t, ob in trade_ws.orderbooks.items()}
 
-    for ticker in tickers:
-        entry = _check_cheap_no(ticker)
+    new_cheap = {}
+    for ticker, yes_bids in all_obs.items():
+        entry = _extract_cheap_no(ticker, yes_bids)
         if entry:
             new_cheap[ticker] = entry
 
@@ -884,12 +887,7 @@ def _full_cheap_nos_reconcile():
             _cheap_nos.update(new_cheap)
             changed = True
 
-    if changed and _event_loop and connected_clients:
-        items = _get_cheap_nos_list()
-        _event_loop.call_soon_threadsafe(
-            asyncio.ensure_future,
-            _broadcast_cheap_nos(items)
-        )
+    _broadcast_if_changed(changed)
 
 
 async def _broadcast_cheap_nos(items):
@@ -987,9 +985,9 @@ async def periodic_fanduel_refresh():
 
 
 async def periodic_cheap_nos_reconcile():
-    """Re-scan all orderbooks every 5 seconds to keep cheap NOs feed fresh."""
+    """Re-scan all orderbooks every 2 seconds to keep cheap NOs feed fresh."""
     while True:
-        await asyncio.sleep(5)
+        await asyncio.sleep(2)
         try:
             await asyncio.to_thread(_full_cheap_nos_reconcile)
         except Exception as e:
