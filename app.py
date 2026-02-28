@@ -875,9 +875,36 @@ async def debug_search(name: str):
 @app.get("/api/debug/reconcile")
 async def debug_reconcile():
     """Manually trigger a cheap NOs REST reconciliation and return results."""
-    await asyncio.to_thread(_full_cheap_nos_reconcile)
+    # First test a single REST fetch
+    tickers = list(ticker_cache.tickers)
+    test_result = None
+    if tickers:
+        test_ticker = tickers[0]
+        try:
+            resp = requests.get(
+                f"https://api.elections.kalshi.com/trade-api/v2/markets/{test_ticker}/orderbook",
+                timeout=5
+            )
+            test_result = {
+                "ticker": test_ticker,
+                "status": resp.status_code,
+                "yes_bids": resp.json().get('orderbook', {}).get('yes', []) if resp.status_code == 200 else None,
+            }
+        except Exception as e:
+            test_result = {"ticker": test_ticker, "error": str(e)}
+
+    try:
+        await asyncio.to_thread(_full_cheap_nos_reconcile)
+    except Exception as e:
+        return {"error": str(e), "ticker_count": len(tickers), "test_fetch": test_result}
+
     with _cheap_nos_lock:
-        return {"count": len(_cheap_nos), "items": list(_cheap_nos.values())}
+        return {
+            "count": len(_cheap_nos),
+            "ticker_count": len(tickers),
+            "test_fetch": test_result,
+            "items": list(_cheap_nos.values()),
+        }
 
 
 @app.websocket("/ws")
