@@ -27,6 +27,18 @@ class KalshiWebSocketManager:
         self.ws_thread = None
         self.on_delta_callback = None
         
+    @staticmethod
+    def _merge_levels(existing, delta):
+        """Merge delta price levels into existing orderbook side.
+        Delta levels with qty 0 remove that price. Others update/add."""
+        book = {price: qty for price, qty in existing}
+        for price, qty in delta:
+            if qty == 0:
+                book.pop(price, None)
+            else:
+                book[price] = qty
+        return sorted(book.items(), key=lambda x: x[0])
+
     def _generate_auth_headers(self):
         timestamp_str = str(int(datetime.now().timestamp() * 1000))
         method = 'GET'
@@ -71,9 +83,15 @@ class KalshiWebSocketManager:
                 if ticker in self.orderbooks:
                     delta = data['msg']
                     if 'yes' in delta:
-                        self.orderbooks[ticker]['orderbook']['yes'] = delta['yes']
+                        self.orderbooks[ticker]['orderbook']['yes'] = self._merge_levels(
+                            self.orderbooks[ticker]['orderbook'].get('yes', []),
+                            delta['yes']
+                        )
                     if 'no' in delta:
-                        self.orderbooks[ticker]['orderbook']['no'] = delta['no']
+                        self.orderbooks[ticker]['orderbook']['no'] = self._merge_levels(
+                            self.orderbooks[ticker]['orderbook'].get('no', []),
+                            delta['no']
+                        )
                     if self.on_delta_callback:
                         ob_snapshot = {
                             'orderbook': {
