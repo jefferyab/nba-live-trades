@@ -67,6 +67,7 @@ class KalshiWebSocketManager:
         
         if data.get('type') == 'orderbook_snapshot':
             ticker = data['msg'].get('market_ticker')
+            ob_snapshot = None
             with self.lock:
                 self.orderbooks[ticker] = {
                     'orderbook': {
@@ -75,7 +76,19 @@ class KalshiWebSocketManager:
                     }
                 }
                 self.pending_tickers.discard(ticker)
-                
+                if self.on_delta_callback:
+                    ob_snapshot = {
+                        'orderbook': {
+                            'yes': list(data['msg'].get('yes', [])),
+                            'no': list(data['msg'].get('no', []))
+                        }
+                    }
+            if ob_snapshot and self.on_delta_callback:
+                try:
+                    self.on_delta_callback(ticker, ob_snapshot)
+                except Exception as e:
+                    print(f"Snapshot callback error: {e}")
+
         elif data.get('type') == 'orderbook_delta':
             ticker = data['msg'].get('market_ticker')
             ob_snapshot = None

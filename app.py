@@ -1271,14 +1271,16 @@ async def periodic_cheap_nos_fast():
             print(f"[CHEAP NO FAST] Failed: {e}")
 
 
-async def periodic_cheap_nos_reconcile():
-    """Batched REST API reconciliation every 10 seconds to discover new cheap NOs."""
+async def periodic_ob_resnapshot():
+    """Resnapshot all orderbook subscriptions every 30 seconds.
+    Triggers fresh snapshots from WS (no REST calls), and the snapshot
+    callback populates cheap_nos immediately for all tickers."""
     while True:
-        await asyncio.sleep(10)
+        await asyncio.sleep(30)
         try:
-            await asyncio.to_thread(_reconcile_batch)
+            await asyncio.to_thread(ob_ws.resnapshot)
         except Exception as e:
-            print(f"[CHEAP NO RECONCILE] Failed: {e}")
+            print(f"[OB RESNAPSHOT] Failed: {e}")
 
 
 async def periodic_trade_cleanup():
@@ -1299,7 +1301,7 @@ async def startup_event():
     asyncio.create_task(periodic_ticker_refresh())
     asyncio.create_task(periodic_fanduel_refresh())
     asyncio.create_task(periodic_cheap_nos_fast())
-    asyncio.create_task(periodic_cheap_nos_reconcile())
+    asyncio.create_task(periodic_ob_resnapshot())
     asyncio.create_task(periodic_trade_cleanup())
 
 
